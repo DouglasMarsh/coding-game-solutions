@@ -306,7 +306,11 @@ class Player
             }
 
             var nextAction = recipe.FirstOrDefault(a => gamestate.CanPlay(a));
-            if( nextAction == null )
+            if( nextAction != null )
+            {
+                actionToPlay = nextAction.ToString();
+            }
+            else
             {
                 if( gamestate.Spells.Any(s => !s.Castable))
                 {
@@ -314,7 +318,11 @@ class Player
                 }
             }
 
-                      
+            // if not Brewing, make sure we are not passing up ability to BREW something early
+            if( nextAction?.ActionType != "BREW")  
+            {
+                nextAction = gamestate.Potions.FirstOrDefault(p => gamestate.CanPlay(p)) ?? nextAction;
+            }        
             
             // Write an action using Console.WriteLine()
             // To debug: Console.Error.WriteLine("Debug messages...");

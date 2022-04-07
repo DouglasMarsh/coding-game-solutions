@@ -324,10 +324,18 @@ class Player
                 nextAction = gamestate.Potions.FirstOrDefault(p => gamestate.CanPlay(p)) ?? nextAction;
             }        
             
+            if( nextAction?.ActionType == "BREW")
+            {
+                recipe = null;
+                targetPotion = null;
+                bestTarget = null;
+            }
+
             // Write an action using Console.WriteLine()
             // To debug: Console.Error.WriteLine("Debug messages...");
 
             Console.WriteLine( nextAction?.ToString() ?? actionToPlay );
+            
             sw.Restart();
         }
     }

@@ -2,8 +2,8 @@
 using System.Linq;
 class D{
 static void Main(string[] args){
-Func<string,int> p=(string s)=>int.Parse(s);
 Func<string[]> r=()=>Console.ReadLine().Split();
+Func<string,int> p=(string s)=>int.Parse(s);
 Func<int[]> y=()=>r().Select(i=>p(i)).ToArray();
 var l=y();var s=new int[l[0]];
 s[l[3]]=l[4];

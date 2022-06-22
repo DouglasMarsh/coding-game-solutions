@@ -78,10 +78,16 @@ while True:
         print("WAIT")
         print("WAIT")
     else:
+        print(dangerous_spiders, file=sys.stderr, flush=True)
         
+
         # hero 0 and 1 is responsible for critical spiders
-        critical_spiders = filter(s.distance_to_base < 5000, dangerous_spiders)
-        s = next(critical_spiders, None)
+        s = next((x for x in dangerous_spiders if  x.distance_to_base < 3000), None)
+        if s == None:
+            print("WAIT")
+        else:
+            print(f"MOVE {s.position.x} {s.position.y}")
+        s = next((x for x in dangerous_spiders if  x.distance_to_base < 3000), None)
         if s == None:
             print("WAIT")
         else:

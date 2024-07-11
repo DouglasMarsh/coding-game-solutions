@@ -52,22 +52,28 @@ def defend(h:Hero):
         print(f"MOVE {s.position.x} {s.position.y}")
         return
 
-    print(f"MOVE {h.defend_pos.x} {h.defend_pos.y}")
+    if h.position == h.defend_pos:
+        print(f"WAIT at DP")
+        return
+    
+    print(f"MOVE {h.defend_pos.x} {h.defend_pos.y} M({h.defend_pos.x},{h.defend_pos.y}) to DP")
 
 def attack(h:Hero):
     
     close_spiders = hero_spiders.get(h._id, [])
     if math.dist(h.position, op_base_pos) < 6000:
-        if len(close_spiders) > 0:            
-            print(f"SPELL WIND {op_base_pos.x} {op_base_pos.y}")
+        if len([s for s in close_spiders if math.dist(s.position, h.position) < 1000]) > 0 and mana > 20:            
+            print(f"SPELL WIND {op_base_pos.x} {op_base_pos.y} W({op_base_pos.x},{op_base_pos.y}) cto")
             return
         else:
-            print(f"MOVE {h.defend_pos.x} {h.defend_pos.y}")
+            print(f"MOVE {h.defend_pos.x} {h.defend_pos.y} M({h.defend_pos.x},{h.defend_pos.y}) defend cto")
             return
     
-    if len(close_spiders) > 3:
-        print(f"SPELL WIND {op_base_pos.x} {op_base_pos.y}")
-        return
+    """ 
+    if len(close_spiders) > 3 and mana > 20:
+        print(f"SPELL WIND {op_base_pos.x} {op_base_pos.y} W({op_base_pos.x},{op_base_pos.y}) pto")
+        return 
+    """
 
     dS = next((s for s in close_spiders if s.threat_for == 1), None) or \
          next((s for s in dangerous_spiders if not s.near_base and not h.ignore_func(s)), None)
@@ -76,16 +82,16 @@ def attack(h:Hero):
     
     if dS:
         if tS and tS in dangerous_spiders:
-            print(f"MOVE {tS.position.x} {tS.position.y}")
+            print(f"MOVE {tS.position.x} {tS.position.y} M({tS.position.x},{tS.position.y}) to DS:T")
             return
         
-        if dS in critical_spiders and math.dist(h.position, dS.position) < 4000:
+        if dS in critical_spiders and math.dist(h.position, dS.position) < 1600:
             h.target = dS._id
-            print(f"MOVE {dS.position.x} {dS.position.y}")
+            print(f"MOVE {dS.position.x} {dS.position.y} M({dS.position.x},{dS.position.y}) to DS")
             return
     
     if tS:
-        print(f"MOVE {tS.position.x} {tS.position.y}")
+        print(f"MOVE {tS.position.x} {tS.position.y} M({tS.position.x},{tS.position.y}) to T")
         return
     
     h.target = 0
@@ -94,25 +100,19 @@ def attack(h:Hero):
         ss = [ v for v in sorted(spiders.values(), key=lambda s: math.dist(h.position, s.position))]
         for s in ss:
             if not h.ignore_func(s):
-                if mana >= 20:
-                    if math.dist(h.position, s.position) < 1200 and math.dist(s.position, op_base_pos) < 10000:
-                        print(f"SPELL WIND {op_base_pos.x} {op_base_pos.y}")
-                        return
-                elif math.dist(h.position, s.position) < 4000:
+                if math.dist(h.position, s.position) < 4000:
                     h.target = s._id                
-                    print(f"MOVE {s.position.x} {s.position.y}")
+                    print(f"MOVE {s.position.x} {s.position.y} M({s.position.x},{s.position.y}) to S.T")
                     return
                 else:               
-                    print(f"MOVE {s.position.x} {s.position.y}")
+                    print(f"MOVE {s.position.x} {s.position.y} M({s.position.x},{s.position.y}) to S")
                     return
-                    
-    
-    if len(critical_spiders) > 0:
-        cs = critical_spiders[-1]
-        print(f"MOVE {cs.position.x} {cs.position.y}")
+                
+    if h.position == h.defend_pos:
+        print(f"WAIT at DP")
         return
-
-    print(f"MOVE {h.defend_pos.x} {h.defend_pos.y}")
+    
+    print(f"MOVE {h.defend_pos.x} {h.defend_pos.y} M({h.defend_pos.x},{h.defend_pos.y}) to DP")
 
 
 # Auto-generated code below aims at helping you parse
@@ -122,7 +122,7 @@ def attack(h:Hero):
 bX, bY = map(int, input().split())
 oX,oY = (0,0)
 oX = 17630 if bX == 0 else 0
-oy = 9000 if bY == 0 else 0
+oY = 9000 if bY == 0 else 0
 
 base_pos:Point = Point( bX, bY)
 op_base_pos:Point = Point( oX, oY)
@@ -191,10 +191,10 @@ while True:
             h.defend_pos = h.position
         elif idx == 1:            
             h.defend_pos = Point(8500, 1500)
-            h.ignore_func = lambda s: s.position.y > 5000
+            h.ignore_func = lambda s: s.threat_for == 2 or s.position.y > 5000
         elif idx == 2:
-            h.defend_pos = Point(13000, 7500) if base_pos.x == 0 else Point(7000, 7500)
-            h.ignore_func = lambda s: s.position.y < 4000
+            h.defend_pos = Point(10000, 7500) if base_pos.x == 0 else Point(7000, 7500)
+            h.ignore_func = lambda s: s.threat_for == 2 or s.position.y < 4000
         
         idx += 1
 

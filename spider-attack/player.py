@@ -28,6 +28,7 @@ class Spider:
 class Hero:
     defend_pos: Point
     ignore_func:Callable[[Spider], bool]
+    was_controlled = False
 
     def __init__(self, _id: int, position: Point, trajectory: Vector, shield_life: int, is_controlled: bool):
         self._id = _id
@@ -39,24 +40,25 @@ class Hero:
         self.ignore_func = lambda s: False
         self.shield_life = shield_life
         self.is_controlled = is_controlled
-
-    def wait(self) -> str:
-        print( f"WAIT {self.name}" )
-    def move(self, p:Point):
-        print( f"MOVE {p.x} {p.y} {self.name}" )
-    def wind(self, p:Point):
-        global mana
-        mana -= 10
-        print( f"SPELL WIND {p.x} {p.y} {self.name}" )
         
-    def control(self, id:int, p:Point):
+
+    def wait(self, msg = ""):
+        print( f"WAIT {self.name} {msg}" )
+    def move(self, p:Point, msg = ""):
+        print( f"MOVE {p.x} {p.y} {self.name} {msg}" )
+    def wind(self, p:Point, msg = ""):
         global mana
         mana -= 10
-        print( f"SPELL CONTROL {id} {p.x} {p.y} {self.name}" )
-    def shield(self, id:int):
+        print( f"SPELL WIND {p.x} {p.y} {self.name} {msg}" )
+        
+    def control(self, id:int, p:Point, msg = ""):
         global mana
         mana -= 10
-        print( f"SPELL SHIELD {id} {self.name}" )
+        print( f"SPELL CONTROL {id} {p.x} {p.y} {self.name} {msg}" )
+    def shield(self, id:int, msg = ""):
+        global mana
+        mana -= 10
+        print( f"SPELL SHIELD {id} {self.name} {msg}" )
 
 def spider_in_range(heros:list[Hero], s: Spider) -> Hero | None:
     for h in heros:
@@ -83,16 +85,18 @@ def approaching_base(b: Point, p:Point, t: Vector) -> bool:
 def farm(h:Hero):
     hero_spiders:InRangeSpiders = hero_spiders_map.get(h._id, InRangeSpiders([],[],[]))
 
-    if len( hero_spiders.control ) > 0 :
+    valid_targets = [s for s in hero_spiders.control if s not in op_critical_spiders]
+
+    if len( valid_targets ) > 0 :
         tS = spiders.get(h.target, None)
-        if tS and tS in hero_spiders.control:
+        if tS and tS in valid_targets:
             p = add_vector(tS.position, tS.trajectory)
             h.move(p)
             return
 
-        cluster = (hero_spiders.control[0], 1)
-        for s in hero_spiders.control:
-            cnt = len([x for x in hero_spiders.control if math.dist(x.position, s.position) <= 800])
+        cluster = (valid_targets[0], 1)
+        for s in valid_targets:
+            cnt = len([x for x in valid_targets if math.dist(x.position, s.position) <= 800])
             if cnt > cluster[1]:
                 cluster = (s,cnt)
         
@@ -111,79 +115,118 @@ def farm(h:Hero):
 def defend(h:Hero):
     hero_spiders:InRangeSpiders = hero_spiders_map.get(h._id, InRangeSpiders([],[],[]))
 
+    if h.was_controlled and h.shield_life == 0:
+        h.shield(h._id, "shield self")
+        return
+
     if len(ultra_spiders) > 0:
         wind_ultra = set(hero_spiders.wind).intersection(ultra_spiders)
         if mana >= 10 and len( [s for s in wind_ultra if s.shield_life == 0]) > 0:
-            h.wind(op_base_pos)
+            h.wind(op_base_pos, "push too close")
             return
 
-        h.move( move_to(ultra_spiders[0].position, base_pos, 400) )  
-        return
 
     if len( critical_spiders) > 0:
-        h.move( move_to(critical_spiders[0].position, base_pos, 400) )  
+        tS = critical_spiders[0]
+        h.move( move_to(tS.position, base_pos, 400), "atc CC"  )  
         return
 
-    if turn > 100:
-        oH = next((oH for oH in op_heros.values() if math.dist(oH.position, base_pos) < 5800 and math.dist(oH.position,h.position) < 2200), None)
-        if oH:
-            h.control(oH._id, op_base_pos)
-            return
-    else:
-        danger_close = set(hero_spiders.wind).intersection(dangerous_spiders)
-        if len(danger_close) > 0:
-            h.move( move_to(danger_close.pop().position, base_pos, 400) ) 
-            return
-           
+    if len(dangerous_spiders) > 0:
+        s = dangerous_spiders[0]
+        h.move( add_vector(s.position, s.trajectory), "atk DGR" )
+        return
+
+    if len(hero_spiders.control) > 0:
+        s = hero_spiders.control[0]
+        h.move( add_vector(s.position, s.trajectory), "atk RS" )
+        return
+
     if h.position == h.defend_pos:
         h.wait()
         return
     
-    h.move( h.defend_pos )
+    h.move( h.defend_pos, "move to DP" )
     return
 
 def attack(h:Hero):
     hero_spiders:InRangeSpiders = hero_spiders_map.get(h._id, InRangeSpiders([],[],[]))
 
+    if h.was_controlled and h.shield_life == 0 and mana > 20:
+        h.shield(h._id)
+        return
+
     if turn > 90: 
-        h.defend_pos = move_to(op_base_pos, base_pos, 5000)
+        h.defend_pos = move_to(op_base_pos, base_pos, 3000)
+
+        if mana > 20:
+            #shield spiders targeting OP
+            aS = next((s for s in hero_spiders.control if s.threat_for == 2 and s.shield_life == 0), None)
+            if aS and len([oh for oh in op_heros.values() if math.dist(oh.position, aS.position) <= 2200]) > 0:
+                h.shield(aS._id, "shd AtkS")
+                return
+            
+            #target spider to OP
+            aS = next((s for s in hero_spiders.control if not s.threat_for == 2 and s.shield_life == 0), None)
+            if aS:
+                h.control(aS._id, op_base_pos, "tgt AtkS")
+                return
+
+
         if math.dist(h.position, h.defend_pos) > 3200:
-           h.move( h.defend_pos)
+           h.move( h.defend_pos, "move to AP")
            return
         
         if mana > 20:
+            if math.dist(h.position, op_base_pos) < 5000:
+                if h.shield_life == 0:
+                    h.shield(h._id)
+                    return
+            
             if len(op_ultra_spiders) > 0:
                 uS = next((s for s in op_ultra_spiders if s.shield_life == 0), None)
                 if uS:
-                    h.shield(uS._id)
+                    h.shield(uS._id, "shd U-AtkS")
                     return                    
-                
+                else:
+                    oH = next((oH for oH in op_heros.values() if oH.shield_life == 0 and math.dist(oH.position, op_base_pos) < 6900),None)
+                    if oH:
+                        if math.dist(oH.position, h.position) <= 2200:
+                            h.control(oH._id, base_pos, "ctrl oH")
+                            return
+                         
             if len(op_critical_spiders) > 0:
                 shielded = [s for s in op_critical_spiders if s.shield_life > 0]
                 if len(shielded) > 3:
-                    oH = next(oH for oH in op_heros.values() if math.dist(oH.position, op_base_pos) < 6900)
+                    oH = next((oH for oH in op_heros.values() if oH.shield_life == 0 and math.dist(oH.position, op_base_pos) < 6900),None)
                     if oH:
-                        h.control(oH._id, base_pos)
+                        if math.dist(oH.position, h.position) <= 2200:
+                            h.control(oH._id, base_pos, "ctrl oH")
+                            return
+                        
+                if len(op_critical_spiders) > len(shielded):
+                    if len( set(hero_spiders.wind).intersection(op_critical_spiders)) > 0:
+                        h.wind(op_base_pos)
                         return
-                    
+                        
                 cS = next((s for s in op_critical_spiders if s.shield_life == 0), None)
                 if cS:
-                    h.shield(cS._id)
+                    h.shield(cS._id, "shd C-AtkS")
                     return
 
             if len(hero_spiders.wind) > 0:
                 if len([s for s in hero_spiders.wind if s.shield_life == 0 and math.dist(s.position, op_base_pos) <= 7000]) > 0:
-                    h.wind(op_base_pos)
+                    h.wind(op_base_pos, "push AtkS")
                     return
             
-            if len(hero_spiders.control) > 0:
-                s = next((s for s in hero_spiders.control if s.threat_for != 2), None)
-                if s:
-                    h.control(s._id, op_base_pos)
+                        
+            oH = next((oH for oH in op_heros.values() if oH.shield_life == 0 and math.dist(oH.position, op_base_pos) < 6900), None)
+            if oH:
+                if math.dist(oH.position, h.position) <= 2200:
+                    h.control(oH._id, base_pos)
                     return
     else:
         farm(h)
-        return            
+        return          
             
     dx = h.defend_pos.x + rnd.randint(0,1200)
     dy = h.defend_pos.y + rnd.randint(0,1200)
@@ -196,19 +239,27 @@ def prevent(h: Hero) -> bool:
         return approaching_base(base_pos, oH.position, oH.trajectory) \
             or math.dist(base_pos, oH.position) <= 6800
 
-    if turn > 100:
+    if (turn > 100 and mana > 20) or mana > 100 :    
         oH = next((oH for oH in sorted(op_heros.values(), key=lambda h: math.dist(base_pos, h.position)) if dangerZone(oH) ), None)
         if oH :
+            if h.shield_life == 0:
+                h.shield(h._id, "shield <- opH")
+                return True               
+            
             if oH.shield_life == 0 :
-                if math.dist(oH.position, h.position) <= 2200:
-                    h.control(oH._id, op_base_pos)
+                if math.dist(oH.position, h.position) <= 1200:
+                    h.wind(op_base_pos, "push opH")
                     return True
-            else :
-                p = add_vector(oH.position, oH.trajectory)
-                h.move(p)
-                return True
+                if math.dist(oH.position, h.position) <= 2200:
+                    h.control(oH._id, op_base_pos, "move opH")
+                    return True
             
     return False
+
+def safety(h:Hero):
+    if len(ultra_spiders) > 0:
+        max_dist = 0
+        
 
 
 # base x,y: The corner of the map representing your base
@@ -225,9 +276,9 @@ heros: dict[int, Hero] = {}
 op_heros: dict[int, Hero] = {}
 
 
-DEFENDER = "DEFENDER"
-SAFETY = "SAFETY"
-ATTACKER = "ATTACKER"
+DEFENDER = "D"
+SAFETY = "S"
+ATTACKER = "A"
 positions = {
     0: move_to(base_pos, op_base_pos, 5000),
     1: Point(8500, 1500),
@@ -311,6 +362,7 @@ while True:
                 heros[_id].trajectory = Vector(vx,vy)
                 heros[_id].shield_life = shield_life
                 heros[_id].is_controlled = is_controlled == 1
+                heros[_id].was_controlled = True if heros[_id].was_controlled else heros[_id].is_controlled
 
         elif _type == 2:
             if not _id in op_heros:
@@ -336,19 +388,22 @@ while True:
     critical_spiders.sort( key=lambda s: s.turns_to_base)
     ultra_spiders.sort( key=lambda s: s.turns_to_base)
 
+    prevent_success = False
     for h in heros.values():
         
         if role[0] == h._id:
             h.name = DEFENDER
             if turn > 75: h.defend_pos = move_to(base_pos, op_base_pos, 2000)
-            defend(h)
+            if not prevent(h) : defend(h) 
+            else: prevent_success = True
         elif role[1] == h._id:
             h.name = SAFETY
-            if turn < 90:
-                attack(h)
-            else:
+            if len([s for s in critical_spiders if s.shield_life != 0]) > 0 or turn > 90:
                 h.defend_pos = move_to(base_pos, op_base_pos, 5000)
-                if not prevent(h): defend(h)
+                if not prevent_success or not prevent(h) : defend(h)
+            else:
+                attack(h)
+            
         else:
             h.name = ATTACKER
             attack(h)

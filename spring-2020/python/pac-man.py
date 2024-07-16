@@ -1,5 +1,6 @@
 import sys
 import math
+import random
 
 from collections import namedtuple
 from typing import Callable
@@ -80,37 +81,41 @@ while True:
         if p.value == 10:
             big_pellets.append( p )
     
+    output:list[str] = []
     for pm in pac_men.values():
+
+        #handle collisions
+        if pm.pos in [op.pos for op in op_pac_men]:
+            pm.target = random.choice( pellets )
+
         p = pm.target
-        if p:
-            print(f"Target pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
-            
+        
         if p and p in pellets:
             print(f"MOVE to pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
-            print(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
+            output.append( f"MOVE {pm._id} {p.pos.x} {p.pos.y}" )
+            pellets.remove( p )
+            if p in big_pellets: big_pellets.remove( p )
             continue
 
         if len( big_pellets) > 0:
-            print(f"No target, have big pellets", file=sys.stderr, flush=True)
             
             big_pellets.sort(key = lambda p: math.dist(p.pos, pm.pos), reverse=True)
             p = big_pellets.pop()
+            pellets.remove( p )
             pm.target = p
-            print(f"Targeting big pellet at {p.pos.x} {p.pos.y}", file=sys.stderr, flush=True)
 
             print(f"MOVE to pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
-            print(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
+            output.append( f"MOVE {pm._id} {p.pos.x} {p.pos.y}" )
             continue
         
         pellets.sort(key = lambda p: math.dist(p.pos, pm.pos), reverse=True)
         p = pellets.pop()
         pm.target = p
-        print(f"Targeting pellet at {p.pos.x} {p.pos.y}", file=sys.stderr, flush=True)
         
         print(f"MOVE to pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
-        print(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
+        output.append(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
         
-
+    print(" | ".join( output))
 
     # Write an action using print
     # To debug: print("Debug messages...", file=sys.stderr, flush=True)

@@ -7,19 +7,30 @@ from typing import Callable
 Point = namedtuple("Point", "x y")
 
 # Grab the pellets as fast as you can!
+class reversor:
+    def __init__(self, obj):
+        self.obj = obj
 
-class PacMan:
-    type = ""
-    boost = 0
-    cooldown = 0
-    def __init__(self, _id: int) -> None:
-        self._id = _id
-        
+    def __eq__(self, other):
+        return other.obj == self.obj
+
+    def __lt__(self, other):
+        return other.obj < self.obj
 
 class Pellet:
     def __init__(self, pos: Point, value: int) -> None:
         self.pos = pos
         self.value = value
+
+class PacMan:
+    pos:Point
+    target:Pellet = None
+
+    type = ""
+    boost = 0
+    cooldown = 0
+    def __init__(self, _id: int) -> None:
+        self._id = _id
 
 # width: size of the grid
 # height: top left corner is (x=0, y=0)
@@ -29,11 +40,11 @@ for i in range(height):
 
 pac_men: dict[int, PacMan] = {}
 op_pac_men: dict[int, PacMan] = {}
-pellets: list[ Pellet ] = [] 
-big_pellets: list[ Pellet ] = []
 
 # game loop
 while True:
+    pellets: list[ Pellet ] = [] 
+    big_pellets: list[ Pellet ] = []
     my_score, opponent_score = [int(i) for i in input().split()]
     visible_pac_count = int(input())  # all your pacs and enemy pacs in sight
     for i in range(visible_pac_count):
@@ -64,13 +75,41 @@ while True:
     for i in range(visible_pellet_count):
         # value: amount of points this pellet is worth
         x, y, value = [int(j) for j in input().split()]
-        pellets.append( Pellet( Point(x,y), value ))
-
-    pellets.sort( lambda p: p.value) 
-
+        p = Pellet( Point(x,y), value )
+        pellets.append( p )
+        if p.value == 10:
+            big_pellets.append( p )
+    
     for pm in pac_men.values():
+        p = pm.target
+        if p:
+            print(f"Target pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
+            
+        if p and p in pellets:
+            print(f"MOVE to pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
+            print(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
+            continue
+
+        if len( big_pellets) > 0:
+            print(f"No target, have big pellets", file=sys.stderr, flush=True)
+            
+            big_pellets.sort(key = lambda p: math.dist(p.pos, pm.pos), reverse=True)
+            p = big_pellets.pop()
+            pm.target = p
+            print(f"Targeting big pellet at {p.pos.x} {p.pos.y}", file=sys.stderr, flush=True)
+
+            print(f"MOVE to pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
+            print(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
+            continue
+        
+        pellets.sort(key = lambda p: math.dist(p.pos, pm.pos), reverse=True)
         p = pellets.pop()
-        print(f"MOVE {pm._id} {p.pos.x} {p.pos.x}")
+        pm.target = p
+        print(f"Targeting pellet at {p.pos.x} {p.pos.y}", file=sys.stderr, flush=True)
+        
+        print(f"MOVE to pellet at {p.pos.x} {p.pos.y} with value {p.value} at dist { math.dist(p.pos, pm.pos) }", file=sys.stderr, flush=True)
+        print(f"MOVE {pm._id} {p.pos.x} {p.pos.y}")
+        
 
 
     # Write an action using print

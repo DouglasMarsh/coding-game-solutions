@@ -2,7 +2,7 @@ import sys
 import math
 import random
 
-from typing import NamedTuple, Union, Iterable
+from typing import NamedTuple, Iterable
 
 
 ROCK = "ROCK"
@@ -75,26 +75,6 @@ class PacMan:
             yield Point(x,y)
             y += 1
 
-def section_grid(cnt: int) -> list[tuple[int,int]]:
-    s_width = int(width / cnt)
-    s_start = 0
-    s_end = s_width
-    sections = []
-    for s in range( cnt ):
-        sections.append((s_start, s_end))
-        s_start = s_end
-        s_end += s_width
-    
-    sections[-1] = (sections[-1][0], width)
-    return sections
-
-def dist_from_section(section: tuple[int,int], p: Point) -> float:
-    center = int((section[1] - section[0])/2)
-    return abs( center - p.x)
-    
-def in_section(section: tuple[int,int], p: Point) -> bool:
-    return p.x >= section[0] and p.x <= section[1]
-
 def need_target() -> Iterable[PacMan]:
     for pm in pac_men.values():
         if not pm.target:
@@ -104,15 +84,13 @@ def need_target() -> Iterable[PacMan]:
             # big pellets target, no nothing
             continue
         else:
-            confirmed_section = [ p for p in confirmed_pellets if in_section(pm.section, p) ]
-            if confirmed_section and pm.target not in confirmed_section:
+            if confirmed_pellets and pm.target not in confirmed_pellets:
                 print(f"{pm} has target {p} that is not confirmed. Retargeting", file=sys.stderr, flush=True)
                 pm.target = None
                 yield pm
                 continue
 
-            possible_section =  [ p for p in possible_pellets if in_section(pm.section, p) ]
-            if possible_section and pm.target not in possible_section:
+            if possible_pellets and pm.target not in possible_pellets:
                 print(f"{pm} has possible target {p} that is not not valid. Retargeting", file=sys.stderr, flush=True)
                 pm.target = None
                 yield pm
@@ -125,9 +103,9 @@ def set_targets(pac_men: Iterable[PacMan] ):
     p_pellets: set[Pellet] = set(possible_pellets.values() )
 
     for pm in pac_men:
-        bsp = sorted([ p for p in b_pellets if in_section(pm.section, p.pos) ], key= lambda p: math.dist(pm.pos, p.pos))
-        csp = sorted([ p for p in c_pellets if in_section(pm.section, p.pos) ], key= lambda p: math.dist(pm.pos, p.pos))
-        psp = sorted([ p for p in p_pellets if in_section(pm.section, p.pos) ], key= lambda p: math.dist(pm.pos, p.pos))
+        bsp = sorted([ p for p in b_pellets ], key= lambda p: math.dist(pm.pos, p.pos))
+        csp = sorted([ p for p in c_pellets ], key= lambda p: math.dist(pm.pos, p.pos))
+        psp = sorted([ p for p in p_pellets ], key= lambda p: math.dist(pm.pos, p.pos))
         
         if bsp:
             p = bsp[0]
@@ -139,7 +117,7 @@ def set_targets(pac_men: Iterable[PacMan] ):
             p = psp[0]
             p_pellets.remove( p )
         else:
-            p = random.choice( list(possible_pellets.values() ))
+            p = random.choice( list( p_pellets ))
 
         pm.target = p.pos
         
@@ -159,7 +137,6 @@ def find_neighbors(p: Point) -> list[Point]:
 
     return neighbors
 
-
 grid: dict[Point, str] = {}
 possible_pellets: dict[Point, Pellet] = {}
 confirmed_pellets: dict[Point, Pellet] = {}
@@ -178,6 +155,7 @@ for y in range(height):
 pac_men: dict[int, PacMan] = {}
 pac_men_cnt = 0
 turn = 0
+
 # game loop
 while True:
     turn += 1
@@ -213,27 +191,13 @@ while True:
         pm.cooldown = int(inputs[6])
         pm.turn_complete = False
         
+        
         if pm.pos in possible_pellets:
             del possible_pellets[ pm.pos ]
         if pm.pos in confirmed_pellets:
             del confirmed_pellets[ pm.pos ]
 
     pac_men = {k: pac_men[k] for k in pac_men if k in alive_pm}
-
-    if turn == 1 or len(pac_men) != pac_men_cnt:
-        pac_men_cnt = len(pac_men)
-        sections = section_grid( pac_men_cnt )
-
-        pm_set = set( pac_men.values() )
-        for s in sections:
-            sorted_pm = sorted(pm_set, key=lambda pm: dist_from_section(s, pm.pos))
-            pm = next( (pm for pm in sorted_pm if in_section(s, pm.pos)), None)
-            if not pm:
-                pm = sorted_pm[0]
-            
-            pm.section = s
-            pm_set.remove( pm )
-            print(f"{pm} assigned to section {pm.section}", file=sys.stderr, flush=True)
 
     visible_pellet_count = int(input())  # all pellets in sight
     visible_pellets: set[Point] = set()

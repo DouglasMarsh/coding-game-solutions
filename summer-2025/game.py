@@ -2,47 +2,63 @@ import sys
 import time
 import heapq
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Set, Optional
+
+from typing import List, Dict, NamedTuple, Optional, Set, Tuple
+
+# --- Type Aliases ---
+class Position(NamedTuple):
+    x: int
+    y: int
+
+    def to_tuple(self) -> Tuple[int,int]:
+        return (self.x, self.y)
+    
+    def distance_to(self, other: 'Position') -> int:
+        return abs(self.x - other.x) + abs(self.y - other.y)
 
 @dataclass
 class AgentMeta:
+    is_enemy: bool
     shoot_cd: int
     opt_range: int
     soak_power: int
     splash_bombs: int
 
 @dataclass
-class AgentState:
+class Agent:
     agent_id: int
-    x: int
-    y: int
+    position: Position
     cooldown: int
+    splash: int
     wetness: int
+    metadata: AgentMeta
 
 @dataclass
 class Tile:
-    x: int
-    y: int
+    position: Position
     tile_type: int  # 0 = empty, 1 = low cover, 2 = high cover
 
+
+Grid = List[List[Tile]]
+
 class AStarPathfinder:
-    def __init__(self, width, height, grid):
+    def __init__(self, width:int, height:int, grid: Grid):
         self.width = width
         self.height = height
         self.grid = grid
 
-    def neighbors(self, node):
+    def neighbors(self, node: Position) -> Position: # type: ignore
         x, y = node
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < self.width and 0 <= ny < self.height:
                 if self.grid[ny][nx].tile_type == 0:
-                    yield (nx, ny)
+                    yield Position(nx, ny)
 
-    def heuristic(self, a, b):
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    def heuristic(self, a: Position, b: Position):
+        return a.distance_to(b)
 
-    def find_path(self, start, goal, blocked):
+    def find_path(self, start: Position, goal: Position, blocked: Set[Position]):
         open_set = []
         heapq.heappush(open_set, (self.heuristic(start, goal), 0, start))
         came_from = {}
@@ -70,150 +86,191 @@ class AStarPathfinder:
         return [start]
 
 class GameState:
-    def __init__(self, my_id, width, height, grid, agents_meta):
+    def __init__(self, my_id: int, width: int, height: int, grid: List[List[Tile]], blocked: Set[Position], agents_meta: Dict[int, AgentMeta]):
         self.my_id = my_id
         self.width = width
         self.height = height
         self.grid = grid
+        self.blocked = blocked
         self.all_agents_meta = agents_meta
         self.pathfinder = AStarPathfinder(width, height, grid)
-        self.my_agents = []
-        self.positions = {}
-        self.cooldowns = {}
-        self.wetness = {}
-        self.my_states = {}
-        self.enemies = []
+        self.my_agents: List[Agent] = []
+        self.enemies: List[Agent] = []
+        
 
     @staticmethod
     def from_input():
         my_id = int(input())
         agent_data_count = int(input())
-        agents_meta = {}
-        my_agents = []
+        agents_meta: Dict[int, AgentMeta] = {}
 
         for _ in range(agent_data_count):
             agent_id, player, cd, rng, power, bombs = map(int, input().split())
-            agents_meta[agent_id] = AgentMeta(cd, rng, power, bombs)
-            if player == my_id:
-                my_agents.append(agent_id)
+            agents_meta[agent_id] = AgentMeta(player != my_id, cd, rng, power, bombs)
+            
 
         width, height = map(int, input().split())
-        grid = [[None] * width for _ in range(height)]
-        for y in range(height):
+        grid: List[List[Optional[Tile]]] = [[None for _ in range(width)] for _ in range(height)]
+        blocked: Set[Position] = set()
+
+        for _ in range(height):
             row = input().split()
             for x in range(width):
                 tx, ty, ttype = int(row[x*3]), int(row[x*3+1]), int(row[x*3+2])
-                grid[ty][tx] = Tile(tx, ty, ttype)
+                grid[ty][tx] = Tile((tx, ty), ttype)
+                if ttype != 0:                    
+                    blocked.add( Position(tx, ty) )
 
-        state = GameState(my_id, width, height, grid, agents_meta)
-        state.my_agents = my_agents
+
+        state = GameState(my_id, width, height, grid, blocked, agents_meta)
+
         return state
 
     def read_turn(self):
-        self.positions.clear()
-        self.cooldowns.clear()
-        self.wetness.clear()
-        self.my_states.clear()
+        self.my_agents.clear()
         self.enemies.clear()
 
         agent_count = int(input())
         for _ in range(agent_count):
             agent_id, x, y, cd, splash, wet = map(int, input().split())
-            self.positions[agent_id] = (x, y)
-            self.cooldowns[agent_id] = cd
-            self.wetness[agent_id] = wet
-            if agent_id in self.my_agents:
-                self.my_states[agent_id] = AgentState(agent_id, x, y, cd, wet)
+            agent = Agent(agent_id, Position(x,y), cd, splash, wet, self.all_agents_meta[ agent_id] )
+            if agent.metadata.is_enemy :
+                self.enemies.append( agent )
             else:
-                self.enemies.append(agent_id)
+                self.my_agents.append( agent )
+
 
 class CoverAnalyzer:
-    def __init__(self, grid):
+    def __init__(self, grid: Grid):
         self.grid = grid
 
-    def is_adjacent_to_cover(self, x, y):
+    def is_adjacent_to_cover(self, p: Position) -> bool:
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nx, ny = x + dx, y + dy
+            nx, ny = p.x + dx, p.y + dy
             if 0 <= nx < len(self.grid[0]) and 0 <= ny < len(self.grid):
                 if self.grid[ny][nx].tile_type in (1, 2):
                     return True
         return False
-    
+
     def find_best_adjacent_cover_tile( 
-        self, x: int, y: int, blocked: Set[Tuple[int, int]], enemy_positions: List[Tuple[int, int]] ) -> Optional[Tuple[int, int]]:
-        best = None
+            self, agent_pos: Position, blocked: Set[Position], enemies: List[Agent] ) -> Optional[Position]:
+        best: Optional[Position] = None
         best_score = -1
 
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            nx, ny = x + dx, y + dy
+            nx, ny = agent_pos.x + dx, agent_pos.y + dy
             if 0 <= nx < len(self.grid[0]) and 0 <= ny < len(self.grid):
+                candidate = Position(nx, ny)
                 tile = self.grid[ny][nx]
-                if tile.tile_type == 0 and (nx, ny) not in blocked:
-                    total_score = 0
 
-                    for ddx, ddy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                        cx, cy = nx + ddx, ny + ddy
-                        if 0 <= cx < len(self.grid[0]) and 0 <= cy < len(self.grid):
-                            adj_tile = self.grid[cy][cx]
-                            if adj_tile.tile_type in (1, 2):
-                                for ex, ey in enemy_positions:
-                                    # Vector from cover → candidate
-                                    v1x, v1y = nx - cx, ny - cy
-                                    # Vector from cover → enemy
-                                    v2x, v2y = ex - cx, ey - cy
-                                    if (v1x, v1y) == (-v2x, -v2y):
-                                        if adj_tile.tile_type == 2:
-                                            total_score += 3
-                                        elif adj_tile.tile_type == 1:
-                                            total_score += 2
-                                    else:
-                                        if adj_tile.tile_type == 2:
-                                            total_score += 1
-                                        elif adj_tile.tile_type == 1:
-                                            total_score += 0.5
+                if tile.tile_type != 0 or candidate in blocked:
+                    continue
 
-                    if total_score > best_score:
-                        best = (nx, ny)
-                        best_score = total_score
+                score = 0
+                for enemy in enemies:
+                    dist = candidate.distance_to(enemy.position)
+                    if dist > 2 * enemy.metadata.opt_range:
+                        continue  # enemy can't reach even at max range
+
+                    # Compute normalized direction from enemy to candidate
+                    dx = candidate.x - enemy.position.x
+                    dy = candidate.y - enemy.position.y
+                    if dx != 0:
+                        dx = dx // abs(dx)
+                    if dy != 0:
+                        dy = dy // abs(dy)
+
+                    # Check tile "behind" candidate (between it and the enemy)
+                    cx = candidate.x - dx
+                    cy = candidate.y - dy
+                    if 0 <= cx < len(self.grid[0]) and 0 <= cy < len(self.grid):
+                        cover_tile = self.grid[cy][cx]
+                        if cover_tile.tile_type == 2:
+                            score += 3
+                        elif cover_tile.tile_type == 1:
+                            score += 2
+
+                if score > best_score:
+                    best = candidate
+                    best_score = score
 
         return best
 
 class Bot:
+    def compute_expected_damage(
+        self,
+        shooter: Agent,
+        from_tile: Position,
+        target: Agent,
+        grid: Grid
+    ) -> int:
+        dist = from_tile.distance_to(target.position)
+        if dist > 2 * shooter.metadata.opt_range:
+            return 0
+
+        # Base damage
+        if dist <= shooter.metadata.opt_range:
+            damage = shooter.metadata.soak_power
+        else:
+            damage = shooter.metadata.soak_power // 2
+
+        # Check all adjacent tiles around the target
+        max_cover = 0  # 0 = no cover, 50 = low, 75 = high
+        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+            cx = target.position.x + dx
+            cy = target.position.y + dy
+            if 0 <= cx < len(grid[0]) and 0 <= cy < len(grid):
+                tile = grid[cy][cx]
+                if tile.tile_type in (1, 2):
+                    # Check if shooter is *not* also adjacent to this cover
+                    if abs(from_tile.x - cx) + abs(from_tile.y - cy) > 1:
+                        if tile.tile_type == 2:
+                            max_cover = max(max_cover, 75)
+                        elif tile.tile_type == 1:
+                            max_cover = max(max_cover, 50)
+
+        # Apply cover penalty if any
+        damage = damage * (100 - max_cover) // 100
+        return damage
+
     def decide(self, state: GameState, cover: CoverAnalyzer) -> List[str]:
-        actions = []
-        target_enemy = None
-        min_protection = float('inf')
-        for eid in state.enemies:
-            x, y = state.positions[eid]
-            protection = 1 if cover.is_adjacent_to_cover(x, y) else 0
-            if protection < min_protection:
-                min_protection = protection
-                target_enemy = eid
 
-        for aid in state.my_agents:
-            state_self = state.my_states[aid]
-            meta = state.all_agents_meta[aid]
-            target_pos = state.positions.get(target_enemy)
+        if not state.enemies:
+            return [f"{a.agent_id};HUNKER_DOWN" for a in state.my_agents]
 
-            blocked = set(state.positions.values())
-            blocked.discard((state_self.x, state_self.y))
+        actions = []        
+        blocked = set( state.blocked )
 
-            best_tile = cover.find_best_adjacent_cover_tile(state_self.x, state_self.y, blocked)
-            move_tile = best_tile if best_tile else (state_self.x, state_self.y)
-
-            dist = abs(move_tile[0] - target_pos[0]) + abs(move_tile[1] - target_pos[1]) if target_pos else 999
-            can_shoot = state_self.cooldown == 0 and target_pos and dist <= 2 * meta.opt_range
-
+        for agent in state.my_agents:
             cmds = []
-            if move_tile != (state_self.x, state_self.y):
-                cmds.append(f"MOVE {move_tile[0]} {move_tile[1]}")
-            if can_shoot:
-                cmds.append(f"SHOOT {target_enemy}")
+            # Find best cover to move to
+            best_tile = cover.find_best_adjacent_cover_tile(agent.position, blocked, state.enemies)
+            move_tile = best_tile if best_tile is not None else (agent.position)
+
+            if move_tile != agent.position:
+                cmds.append(f"MOVE {move_tile.x} {move_tile.y}")
+                blocked.add( move_tile )
+            else:
+                blocked.add( agent.position )
+
+
+            # Find best enemy to shoot from this tile
+            best_target:Agent = None
+            max_damage = 0
+            for enemy in state.enemies:
+                dmg = self.compute_expected_damage(agent, move_tile, enemy, state.grid)
+                if dmg > max_damage:
+                    best_target = enemy
+                    max_damage = dmg
+
+            if agent.cooldown == 0 and best_target and max_damage > 0:
+                cmds.append(f"SHOOT {best_target.agent_id}")
+
             if not cmds:
                 cmds = ["HUNKER_DOWN"]
 
-            actions.append(f"{aid};{';'.join(cmds)}")
-            print(f"DEBUG: {aid};{';'.join(cmds)}", file=sys.stderr)
+            actions.append(f"{agent.agent_id};{';'.join(cmds)}")
+            print(f"DEBUG: {agent.agent_id};{';'.join(cmds)}", file=sys.stderr)
             
         return actions
 

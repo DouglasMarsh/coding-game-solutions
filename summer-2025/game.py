@@ -1,7 +1,7 @@
 import sys
 import time
 import heapq
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple
 
@@ -15,9 +15,14 @@ class Position(NamedTuple):
     
     def distance_to(self, other: 'Position') -> int:
         return abs(self.x - other.x) + abs(self.y - other.y)
+@dataclass
+class Tile:
+    position: Position
+    tile_type: int  # 0 = empty, 1 = low cover, 2 = high cover
 
 @dataclass
 class AgentMeta:
+    agent_id: int
     is_enemy: bool
     shoot_cd: int
     opt_range: int
@@ -26,18 +31,15 @@ class AgentMeta:
 
 @dataclass
 class Agent:
-    agent_id: int
+    metadata: AgentMeta
     position: Position
     cooldown: int
     splash: int
     wetness: int
-    metadata: AgentMeta
-
-@dataclass
-class Tile:
-    position: Position
-    tile_type: int  # 0 = empty, 1 = low cover, 2 = high cover
-
+    
+    @property
+    def agent_id(self) -> int:
+        return self.metadata.agent_id
 
 Grid = List[List[Tile]]
 
@@ -106,7 +108,7 @@ class GameState:
 
         for _ in range(agent_data_count):
             agent_id, player, cd, rng, power, bombs = map(int, input().split())
-            agents_meta[agent_id] = AgentMeta(player != my_id, cd, rng, power, bombs)
+            agents_meta[agent_id] = AgentMeta(agent_id, player != my_id, cd, rng, power, bombs)
             
 
         width, height = map(int, input().split())
@@ -117,8 +119,8 @@ class GameState:
             row = input().split()
             for x in range(width):
                 tx, ty, ttype = int(row[x*3]), int(row[x*3+1]), int(row[x*3+2])
-                grid[ty][tx] = Tile((tx, ty), ttype)
-                if ttype != 0:                    
+                grid[ty][tx] = Tile(Position(tx, ty), ttype)
+                if ttype != 0:        
                     blocked.add( Position(tx, ty) )
 
 
@@ -133,18 +135,18 @@ class GameState:
         agent_count = int(input())
         for _ in range(agent_count):
             agent_id, x, y, cd, splash, wet = map(int, input().split())
-            agent = Agent(agent_id, Position(x,y), cd, splash, wet, self.all_agents_meta[ agent_id] )
+            agent = Agent(self.all_agents_meta[ agent_id], Position(x,y), cd, splash, wet)
             if agent.metadata.is_enemy :
                 self.enemies.append( agent )
             else:
                 self.my_agents.append( agent )
-
 
 class CoverAnalyzer:
     def __init__(self, grid: Grid):
         self.grid = grid
 
     def is_adjacent_to_cover(self, p: Position) -> bool:
+        
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nx, ny = p.x + dx, p.y + dy
             if 0 <= nx < len(self.grid[0]) and 0 <= ny < len(self.grid):
@@ -154,6 +156,7 @@ class CoverAnalyzer:
 
     def find_best_adjacent_cover_tile( 
             self, agent_pos: Position, blocked: Set[Position], enemies: List[Agent] ) -> Optional[Position]:
+
         best: Optional[Position] = None
         best_score = -1
 
@@ -197,48 +200,96 @@ class CoverAnalyzer:
         return best
 
 class Bot:
-    def compute_expected_damage(
-        self,
-        shooter: Agent,
-        from_tile: Position,
-        target: Agent,
-        grid: Grid
-    ) -> int:
-        dist = from_tile.distance_to(target.position)
-        if dist > 2 * shooter.metadata.opt_range:
-            return 0
+    def compute_range_multiplier(self, dist: int, opt_range: int) -> float:
 
-        # Base damage
-        if dist <= shooter.metadata.opt_range:
-            damage = shooter.metadata.soak_power
+        if dist > 2 * opt_range:
+            return 0.0
+        elif dist <= opt_range:
+            return 1.0
         else:
-            damage = shooter.metadata.soak_power // 2
+            return 0.5
 
-        # Check all adjacent tiles around the target
-        max_cover = 0  # 0 = no cover, 50 = low, 75 = high
-        for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
-            cx = target.position.x + dx
-            cy = target.position.y + dy
+    def compute_cover_multiplier(
+        self,
+        shooter_pos: Position,
+        target_pos: Position,
+        grid: Grid
+    ) -> float:
+        """
+        Applies max reduction from tiles adjacent to target but not adjacent to shooter.
+        High cover = 0.25 (75% blocked), Low = 0.5 (50%)
+        """
+        max_penalty = 0
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            cx = target_pos.x + dx
+            cy = target_pos.y + dy
             if 0 <= cx < len(grid[0]) and 0 <= cy < len(grid):
                 tile = grid[cy][cx]
                 if tile.tile_type in (1, 2):
-                    # Check if shooter is *not* also adjacent to this cover
-                    if abs(from_tile.x - cx) + abs(from_tile.y - cy) > 1:
+                    if abs(shooter_pos.x - cx) + abs(shooter_pos.y - cy) > 1:
                         if tile.tile_type == 2:
-                            max_cover = max(max_cover, 75)
+                            max_penalty = max(max_penalty, 0.75)
                         elif tile.tile_type == 1:
-                            max_cover = max(max_cover, 50)
+                            max_penalty = max(max_penalty, 0.5)
+        return 1.0 - max_penalty
 
-        # Apply cover penalty if any
-        damage = damage * (100 - max_cover) // 100
-        return damage
+    def compute_cover_heuristic(
+        self, 
+        shooter_pos: Position,
+        target_pos: Position,
+        grid: Grid
+    ) -> int:
+        """
+        Returns a heuristic score based on adjacent cover.
+        Used as a tiebreaker in SortKey. Lower is better.
+        """
+        score = 0
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            cx = target_pos.x + dx
+            cy = target_pos.y + dy
+            if 0 <= cx < len(grid[0]) and 0 <= cy < len(grid):
+                tile = grid[cy][cx]
+                if tile.tile_type in (1, 2):
+                    if abs(shooter_pos.x - cx) + abs(shooter_pos.y - cy) > 1:
+                        score += tile.tile_type  # low = 1, high = 2
+        return score
+
+    def compute_damage(
+        self,
+        shooter: Agent,
+        target: Agent,
+        grid: Grid
+    ) -> int:
+
+        dist = shooter.position.distance_to(target.position)
+        distance_mult = self.compute_range_multiplier(dist, shooter.metadata.opt_range)
+        cover_mult = self.compute_cover_multiplier(shooter.position, target.position, grid)
+        dmg = int(shooter.metadata.soak_power * distance_mult * cover_mult)
+
+        return dmg
+
+    def compute_sort_key(
+        self,
+        shooter: Agent,
+        target: Agent,
+        grid: Grid
+    ) -> Tuple[int, int, int, int]:
+        """
+        SortKey for selecting best target.
+        Prioritizes: highest damage → closest → lowest cover score  → lowest ID
+        """
+        dist = shooter.position.distance_to(target.position)
+        damage = self.compute_damage(shooter, target, grid)
+        cover_score = self.compute_cover_heuristic(shooter.position, target.position, grid)
+
+        return (-damage, dist, cover_score, target.agent_id)
 
     def decide(self, state: GameState, cover: CoverAnalyzer) -> List[str]:
 
         if not state.enemies:
             return [f"{a.agent_id};HUNKER_DOWN" for a in state.my_agents]
 
-        actions = []        
+        actions = []
         blocked = set( state.blocked )
 
         for agent in state.my_agents:
@@ -248,54 +299,53 @@ class Bot:
             move_tile = best_tile if best_tile is not None else (agent.position)
 
             if move_tile != agent.position:
+                agent.position = move_tile #this could cause issues when we start simulating.
                 cmds.append(f"MOVE {move_tile.x} {move_tile.y}")
                 blocked.add( move_tile )
             else:
                 blocked.add( agent.position )
 
-
             # Find best enemy to shoot from this tile
-            best_target:Agent = None
-            max_damage = 0
+            candidates = []
             for enemy in state.enemies:
-                dmg = self.compute_expected_damage(agent, move_tile, enemy, state.grid)
-                if dmg > max_damage:
-                    best_target = enemy
-                    max_damage = dmg
+                dist = agent.position.distance_to(enemy.position)
+                range_multi = self.compute_range_multiplier(dist, agent.metadata.opt_range)
+                cover_multi = self.compute_cover_multiplier(agent.position, enemy.position, state.grid)
+                dmg = int(agent.metadata.soak_power * range_multi * cover_multi)
 
-            if agent.cooldown == 0 and best_target and max_damage > 0:
+                sort_key = (-dmg, -range_multi, enemy.agent_id)
+                candidates.append((sort_key, enemy))
+
+            candidates.sort()
+            best_target = candidates[0][1] if candidates else None
+            if agent.cooldown == 0 and best_target:
                 cmds.append(f"SHOOT {best_target.agent_id}")
 
             if not cmds:
                 cmds = ["HUNKER_DOWN"]
 
             actions.append(f"{agent.agent_id};{';'.join(cmds)}")
-            print(f"DEBUG: {agent.agent_id};{';'.join(cmds)}", file=sys.stderr)
+            print(f"{agent.agent_id};{';'.join(cmds)}", file=sys.stderr)
             
         return actions
 
 class Game:
     def __init__(self):
-        print(f"DEBUG: Initialization {time.time()}", file=sys.stderr)
+
         self.state = GameState.from_input()
         self.cover = CoverAnalyzer(self.state.grid)
 
-        print(f"DEBUG: GRID {self.state.grid}", file=sys.stderr)
+        print(f"GRID {self.state.grid}",file=sys.stderr) 
 
         self.bot = Bot()
-        print(f"DEBUG: Initialization Complete {time.time()}", file=sys.stderr)
 
     def run(self):
-        turn = 1
-        while True:
-            print(f"DEBUG: Turn {turn}. {time.time()}", file=sys.stderr)
 
+        while True:
             self.state.read_turn()
             actions = self.bot.decide(self.state, self.cover)
             for act in actions:
                 print(act, flush=True)
-            turn += 1
 
-            print(f"DEBUG: Turn {turn} end. {time.time()}", file=sys.stderr)
 
 Game().run()

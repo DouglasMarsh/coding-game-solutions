@@ -1,7 +1,7 @@
+from itertools import combinations
 import sys
-import time
 import heapq
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple
 
@@ -15,6 +15,11 @@ class Position(NamedTuple):
     
     def distance_to(self, other: 'Position') -> int:
         return abs(self.x - other.x) + abs(self.y - other.y)
+    
+    def __str__(self) -> str:
+        return f"P({self.x},{self.y})"
+    def __repr__(self):
+        return self.__str__()
 @dataclass
 class Tile:
     position: Position
@@ -34,12 +39,34 @@ class Agent:
     metadata: AgentMeta
     position: Position
     cooldown: int
-    splash: int
+    bomb_cnt: int
     wetness: int
     
     @property
     def agent_id(self) -> int:
         return self.metadata.agent_id
+
+    @property
+    def is_enemy(self) -> bool:
+        return self.metadata.is_enemy
+    @property
+    def is_friendly(self) -> bool:
+        return not self.is_enemy
+    
+    def has_bombs(self) -> bool:
+        return self.bomb_cnt > 0
+
+    def __str__(self) -> str:
+        prefix = "A" if self.is_friendly else "E"
+        parts = [f"{prefix}{self.agent_id}@{self.position.x},{self.position.y}"]
+        parts.append(f"cd={self.cooldown}")
+        parts.append(f"b={self.bomb_cnt}")
+        parts.append(f"w={self.wetness}")
+
+        return " ".join(parts)
+
+    def __repr__(self):
+        return self.__str__()
 
 Grid = List[List[Tile]]
 
@@ -134,12 +161,45 @@ class GameState:
 
         agent_count = int(input())
         for _ in range(agent_count):
-            agent_id, x, y, cd, splash, wet = map(int, input().split())
-            agent = Agent(self.all_agents_meta[ agent_id], Position(x,y), cd, splash, wet)
+            agent_id, x, y, cd, bombs, wet = map(int, input().split())
+            agent = Agent(self.all_agents_meta[ agent_id], Position(x,y), cd, bombs, wet)
             if agent.metadata.is_enemy :
                 self.enemies.append( agent )
             else:
                 self.my_agents.append( agent )
+        
+        input() # read my_agent count (not needed)
+
+    def debug_string(self) -> str:
+        lines = []
+        lines.append("[GRID]")
+        for y in range(self.height):
+            row_str = f"{y}: "
+            for x in range(self.width):
+                pos = Position(x, y)
+                tile = self.grid[y][x]
+                char = "."
+                if tile.tile_type == 1:
+                    char = "L"
+                elif tile.tile_type == 2:
+                    char = "H"
+
+                for agent in self.my_agents:
+                    if agent.position == pos:
+                        char = str(agent.agent_id)
+                for enemy in self.enemies:
+                    if enemy.position == pos:
+                        char = "E"
+                row_str += f"{char} "
+            lines.append(row_str.strip())
+
+        lines.append("\n[AGENTS]")
+        for a in self.my_agents:
+            lines.append(f"{a.agent_id} @ ({a.position.x},{a.position.y}) cd={a.cooldown} b={a.bomb_cnt} w={a.wetness}")
+        for e in self.enemies:
+            lines.append(f"E{e.agent_id} @ ({e.position.x},{e.position.y}) w={e.wetness}")
+
+        return "\n".join(lines)
 
 class CoverAnalyzer:
     def __init__(self, grid: Grid):
@@ -233,26 +293,56 @@ class Bot:
                             max_penalty = max(max_penalty, 0.5)
         return 1.0 - max_penalty
 
-    def compute_cover_heuristic(
-        self, 
-        shooter_pos: Position,
-        target_pos: Position,
-        grid: Grid
-    ) -> int:
+    def compute_bomb_target(self, shooter: Agent, friendlies: List[Agent], enemies: List[Agent]) -> Optional[Position]:
         """
-        Returns a heuristic score based on adjacent cover.
-        Used as a tiebreaker in SortKey. Lower is better.
+        Calculate best target for a bomb.
+        - bomb can be thrown a distance of 4
+        - bomb has a blast radius of
+            - impact tile
+            - all adjacent tiles (orthogonally and diagonally). 
+        - do NOT throw bomb so that a friendly is in the blast radius
+        - throw bomb so that maximum enemies will be hit
         """
-        score = 0
-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-            cx = target_pos.x + dx
-            cy = target_pos.y + dy
-            if 0 <= cx < len(grid[0]) and 0 <= cy < len(grid):
-                tile = grid[cy][cx]
-                if tile.tile_type in (1, 2):
-                    if abs(shooter_pos.x - cx) + abs(shooter_pos.y - cy) > 1:
-                        score += tile.tile_type  # low = 1, high = 2
-        return score
+        if not shooter.has_bombs():
+            return None
+
+        friendlies.remove( shooter )
+
+        max_hits = 0
+        best_tile = None
+
+        # Search within 4-tile manhattan range
+        for dx in range(-4, 5):
+            for dy in range(-4, 5):
+                tx = shooter.position.x + dx
+                ty = shooter.position.y + dy
+
+                if tx < 0 or ty < 0: continue
+
+                if abs(dx) + abs(dy) > 4:
+                    continue  # outside bomb range
+
+                target_tile = Position(tx, ty)
+
+                # compute AoE splash radius (8 + center)
+                aoe_tiles = [
+                    Position(tx + ox, ty + oy)
+                    for ox in [-1, 0, 1]
+                    for oy in [-1, 0, 1]
+                    if 0 <= tx + ox < 13 and 0 <= ty + oy < 5
+                ]
+
+                # don't bomb if any friendly is inside blast radius
+                if any(f.position in aoe_tiles for f in friendlies):
+                    continue
+
+                hit_count = sum(1 for e in enemies if e.position in aoe_tiles)
+
+                if hit_count > max_hits:
+                    max_hits = hit_count
+                    best_tile = target_tile
+
+        return best_tile
 
     def compute_damage(
         self,
@@ -267,22 +357,6 @@ class Bot:
         dmg = int(shooter.metadata.soak_power * distance_mult * cover_mult)
 
         return dmg
-
-    def compute_sort_key(
-        self,
-        shooter: Agent,
-        target: Agent,
-        grid: Grid
-    ) -> Tuple[int, int, int, int]:
-        """
-        SortKey for selecting best target.
-        Prioritizes: highest damage → closest → lowest cover score  → lowest ID
-        """
-        dist = shooter.position.distance_to(target.position)
-        damage = self.compute_damage(shooter, target, grid)
-        cover_score = self.compute_cover_heuristic(shooter.position, target.position, grid)
-
-        return (-damage, dist, cover_score, target.agent_id)
 
     def decide(self, state: GameState, cover: CoverAnalyzer) -> List[str]:
 
@@ -305,21 +379,28 @@ class Bot:
             else:
                 blocked.add( agent.position )
 
-            # Find best enemy to shoot from this tile
-            candidates = []
-            for enemy in state.enemies:
-                dist = agent.position.distance_to(enemy.position)
-                range_multi = self.compute_range_multiplier(dist, agent.metadata.opt_range)
-                cover_multi = self.compute_cover_multiplier(agent.position, enemy.position, state.grid)
-                dmg = int(agent.metadata.soak_power * range_multi * cover_multi)
+            # should we throw a bomb?
+            bomb_target = self.compute_bomb_target(agent, state.my_agents, state.enemies)
+            if bomb_target:
+                cmds.append(f"THROW {bomb_target.x} {bomb_target.y}")
+            else:
+                # Find best enemy to shoot from this tile
+                candidates = []
+                for enemy in state.enemies:
+                    dist = agent.position.distance_to(enemy.position)
 
-                sort_key = (-dmg, -range_multi, enemy.agent_id)
-                candidates.append((sort_key, enemy))
+                    if dist <= 2*agent.metadata.opt_range:
+                        range_multi = self.compute_range_multiplier(dist, agent.metadata.opt_range)
+                        cover_multi = self.compute_cover_multiplier(agent.position, enemy.position, state.grid)
+                        dmg = int(agent.metadata.soak_power * range_multi * cover_multi)
 
-            candidates.sort()
-            best_target = candidates[0][1] if candidates else None
-            if agent.cooldown == 0 and best_target:
-                cmds.append(f"SHOOT {best_target.agent_id}")
+                        sort_key = (-dmg, -range_multi, enemy.agent_id)
+                        candidates.append((sort_key, enemy))
+
+                candidates.sort()
+                best_target = candidates[0][1] if candidates else None
+                if agent.cooldown == 0 and best_target:
+                    cmds.append(f"SHOOT {best_target.agent_id}")
 
             if not cmds:
                 cmds = ["HUNKER_DOWN"]
@@ -329,21 +410,193 @@ class Bot:
             
         return actions
 
+class BombBot:
+    def __init__(self, state: GameState):
+        self.state = state
+
+    @property
+    def grid(self):
+        return self.state.grid
+    @property
+    def agents(self):
+        return self.state.my_agents
+    @property
+    def enemies(self):
+        return self.state.enemies
+    @property
+    def pathfinder(self):
+        return self.state.pathfinder
+    @property
+    def blocked(self):
+        return self.state.blocked
+    
+    def get_aoe_tiles(self, center: Position) -> Set[Position]:
+        return {
+            Position(center.x + dx, center.y + dy)
+            for dx in [-1, 0, 1]
+            for dy in [-1, 0, 1]
+            if 0 <= center.x + dx < len(self.grid[0]) and 0 <= center.y + dy < len(self.grid)
+        }
+
+    def get_possible_bomb_centers_for_enemy(self, enemy_pos: Position) -> Set[Position]:
+        centers = set()
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                cx, cy = enemy_pos.x - dx, enemy_pos.y - dy
+                if 0 <= cx < len(self.grid[0]) and 0 <= cy < len(self.grid):
+                    centers.add(Position(cx, cy))
+        return centers
+
+    def compute_candidate_targets(self) -> List[Tuple[Position, Set[int]]]:
+        enemy_map = {e.position: e.agent_id for e in self.enemies}
+        candidate_centers: Set[Position] = set()
+
+        for enemy in self.enemies:
+            candidate_centers.update(self.get_possible_bomb_centers_for_enemy(enemy.position))
+
+        candidates = []
+        seen: Set[Position] = set()
+        for center in candidate_centers:
+            if center in seen:
+                continue
+            aoe = self.get_aoe_tiles(center)
+            hit_ids = {eid for pos, eid in enemy_map.items() if pos in aoe}
+            if hit_ids:
+                candidates.append((center, hit_ids))
+                seen.add(center)
+
+        print(f"[DEBUG] {len(candidates)} candidate bomb targets computed", file=sys.stderr)
+        return candidates
+
+    def get_throw_origins(self, target: Position) -> Set[Position]:
+        origins = set()
+        for dx in range(-4, 5):
+            for dy in range(-4, 5):
+                if abs(dx) + abs(dy) > 4:
+                    continue
+                px, py = target.x + dx, target.y + dy
+                if 0 <= px < len(self.grid[0]) and 0 <= py < len(self.grid):
+                    origins.add(Position(px, py))
+        return origins
+
+    def plan_throw_assignments(self) -> Optional[Dict[int, List[Tuple[Position, Position]]]]:
+        total_enemies = {e.agent_id for e in self.enemies}
+        candidates = self.compute_candidate_targets()
+        target_aoe_map = {center: aoe for center, aoe in candidates}
+
+        # Precompute throw origins for targets
+        target_to_origins: Dict[Position, Set[Position]] = {
+            target: self.get_throw_origins(target) for target in target_aoe_map
+        }
+
+        # Precompute reachability for each agent
+        agent_reach: Dict[int, Set[Position]] = {}
+        for agent in self.agents:
+            reachable = set()
+            for target, origins in target_to_origins.items():
+                for origin in origins:
+                    path = self.pathfinder.find_path(agent.position, origin, self.blocked)
+                    if path:
+                        reachable.add(origin)
+            agent_reach[agent.agent_id] = reachable
+
+        # Only consider combinations of candidates that cover all enemies
+        full_cover_combos = []
+        for k in range(1, min(sum(a.bomb_cnt for a in self.agents), len(candidates)) + 1):
+            for combo in combinations(candidates, k):
+                covered = set()
+                targets = []
+                for center, ids in combo:
+                    covered.update(ids)
+                    targets.append(center)
+                if covered == total_enemies:
+                    full_cover_combos.append(targets)
+
+        print(f"[DEBUG] Found {len(full_cover_combos)} full-cover combinations", file=sys.stderr)
+
+        # Attempt assignment only on full coverage combos
+        for combo_index, targets in enumerate(full_cover_combos):
+            print(f"[DEBUG] Trying combo {combo_index + 1}/{len(full_cover_combos)}: {[str(t) for t in targets]}", file=sys.stderr)
+            assignments: Dict[int, List[Tuple[Position, Position]]] = {}
+            bombs_left = {a.agent_id: a.bomb_cnt for a in self.agents}
+            used_origins: Set[Position] = set()
+            success = True
+
+            for target in targets:
+                assigned = False
+                origins = target_to_origins[target]
+                for agent in self.agents:
+                    if bombs_left[agent.agent_id] == 0:
+                        continue
+                    for origin in origins:
+                        if origin in used_origins:
+                            continue
+                        if origin in agent_reach[agent.agent_id]:
+                            assignments.setdefault(agent.agent_id, []).append((origin, target))
+                            bombs_left[agent.agent_id] -= 1
+                            used_origins.add(origin)
+                            assigned = True
+                            break
+                    if assigned:
+                        break
+                if not assigned:
+                    print(f"[DEBUG] Failed to assign target {target}", file=sys.stderr)
+                    success = False
+                    break
+
+            if success:
+                print(f"[DEBUG] Successful plan found with {len(assignments)} agents", file=sys.stderr)
+                return assignments
+
+        print("[DEBUG] No valid assignment found", file=sys.stderr)
+        return None
+
+
+    def decide(self) -> List[str]:
+        throw_plan = self.plan_throw_assignments()
+        if not throw_plan:
+            return [f"{a.agent_id};HUNKER_DOWN" for a in self.agents]
+
+        actions = []
+        for agent in self.agents:
+            cmds = []
+            if agent.agent_id not in throw_plan:
+                cmds.append("HUNKER_DOWN")
+            else:
+                assignments = throw_plan[agent.agent_id]
+                for origin, target in assignments:
+                    if agent.position == origin:
+                        cmds.append(f"THROW {target.x} {target.y}")
+                    else:
+                        path = self.pathfinder.find_path(agent.position, origin, self.blocked)
+                        if path and len(path) > 1:
+                            next_pos = path[1]
+                            cmds.append(f"MOVE {next_pos.x} {next_pos.y}")
+                            if next_pos == origin:
+                                cmds.append(f"THROW {target.x} {target.y}")
+                        else:
+                            cmds.append("HUNKER_DOWN")
+                        break  # Only one move per turn
+            actions.append(f"{agent.agent_id};{'/'.join(cmds)}")
+        return actions
+
+
 class Game:
     def __init__(self):
 
         self.state = GameState.from_input()
         self.cover = CoverAnalyzer(self.state.grid)
 
-        print(f"GRID {self.state.grid}",file=sys.stderr) 
-
-        self.bot = Bot()
+        self.bot = BombBot(self.state)
 
     def run(self):
 
-        while True:
+        while True:            
             self.state.read_turn()
-            actions = self.bot.decide(self.state, self.cover)
+
+            print(self.state.debug_string(), file=sys.stderr)
+
+            actions = self.bot.decide()
             for act in actions:
                 print(act, flush=True)
 

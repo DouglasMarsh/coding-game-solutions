@@ -1,9 +1,9 @@
-from itertools import combinations
+
 import sys
 import heapq
 from dataclasses import dataclass
 
-from typing import List, Dict, NamedTuple, Optional, Set, Tuple
+from typing import FrozenSet, List, Dict, NamedTuple, Optional, Set, Tuple
 
 # --- Type Aliases ---
 class Position(NamedTuple):
@@ -93,6 +93,8 @@ class AStarPathfinder:
         came_from = {}
         cost_so_far = {start: 0}
 
+        dynamic_blocked = [p for p in blocked if p != start]
+
         while open_set:
             _, cost, current = heapq.heappop(open_set)
             if current == goal:
@@ -104,7 +106,7 @@ class AStarPathfinder:
                 return path
 
             for neighbor in self.neighbors(current):
-                if neighbor in blocked:
+                if neighbor in dynamic_blocked:
                     continue
                 new_cost = cost + 1
                 if neighbor not in cost_so_far or new_cost < cost_so_far[neighbor]:
@@ -125,7 +127,7 @@ class GameState:
         self.pathfinder = AStarPathfinder(width, height, grid)
         self.my_agents: List[Agent] = []
         self.enemies: List[Agent] = []
-        
+        self.accessibility_map: Dict[Position, Set[Position]] = self.build_accessibility_map()
 
     @staticmethod
     def from_input():
@@ -147,7 +149,7 @@ class GameState:
             for x in range(width):
                 tx, ty, ttype = int(row[x*3]), int(row[x*3+1]), int(row[x*3+2])
                 grid[ty][tx] = Tile(Position(tx, ty), ttype)
-                if ttype != 0:        
+                if ttype != 0:
                     blocked.add( Position(tx, ty) )
 
 
@@ -169,6 +171,38 @@ class GameState:
                 self.my_agents.append( agent )
         
         input() # read my_agent count (not needed)
+    
+    def build_accessibility_map(self) -> Dict[Position, Set[Position]]:
+        walkable_tiles = [
+            Position(x, y)
+            for y in range(self.height)
+            for x in range(self.width)
+            if self.grid[y][x].tile_type == 0
+        ]
+
+        accessibility_map: Dict[Position, Set[Position]] = {}   
+        for start in walkable_tiles:
+            reachable = set()
+            frontier = [start]
+            visited = set()
+
+            while frontier:
+                current = frontier.pop()
+                if current in visited:
+                    continue
+                visited.add(current)
+                reachable.add(current)
+
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = current.x + dx, current.y + dy
+                    np = Position(nx, ny)
+                    if 0 <= nx < self.width and 0 <= ny < self.height:
+                        if np not in self.blocked and np not in visited:
+                            frontier.append(np)
+
+            accessibility_map[start] = reachable
+
+        return accessibility_map
 
     def debug_string(self) -> str:
         lines = []
@@ -412,174 +446,181 @@ class Bot:
 
 class BombBot:
     def __init__(self, state: GameState):
+        # Store all relevant references and precalculated sets for efficiency
         self.state = state
+        self.grid = state.grid
+        self.agents = state.my_agents
+        self.enemies = state.enemies
+        self.enemy_positions = {e.position for e in self.enemies}
+        self.agent_positions = {a.position for a in self.agents}
+        self.blocked_static = state.blocked
+        self.pathfinder = state.pathfinder
+        self.width = state.width
+        self.height = state.height
 
-    @property
-    def grid(self):
-        return self.state.grid
-    @property
-    def agents(self):
-        return self.state.my_agents
-    @property
-    def enemies(self):
-        return self.state.enemies
-    @property
-    def pathfinder(self):
-        return self.state.pathfinder
-    @property
-    def blocked(self):
-        return self.state.blocked
-    
+    def is_agent_trapped(self, agent: Agent, max_depth: int = 20) -> bool:
+        """
+        Returns True if the agent is surrounded by cover or enclosed by the map/walls
+        with no path to any open area (within a limit of `max_depth` tiles explored).
+        """
+        visited = set()
+        frontier = [agent.position]
+        steps = 0
+
+        while frontier and steps < max_depth:
+            current = frontier.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+
+            x, y = current.x, current.y
+
+            # If on map edge or next to an open tile, agent is not trapped
+            if x == 0 or y == 0 or x == self.width - 1 or y == self.height - 1:
+                return False
+            if self.grid[y][x].tile_type == 0:
+                return False
+
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.width and 0 <= ny < self.height:
+                    next_pos = Position(nx, ny)
+                    tile = self.grid[ny][nx]
+                    if tile.tile_type == 0 and next_pos not in visited:
+                        frontier.append(next_pos)
+
+            steps += 1
+
+        # If search finishes without finding an exit
+        return True
+
     def get_aoe_tiles(self, center: Position) -> Set[Position]:
         return {
             Position(center.x + dx, center.y + dy)
             for dx in [-1, 0, 1]
             for dy in [-1, 0, 1]
-            if 0 <= center.x + dx < len(self.grid[0]) and 0 <= center.y + dy < len(self.grid)
+            if 0 <= center.x + dx < self.width and 0 <= center.y + dy < self.height
         }
-
-    def get_possible_bomb_centers_for_enemy(self, enemy_pos: Position) -> Set[Position]:
-        centers = set()
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                cx, cy = enemy_pos.x - dx, enemy_pos.y - dy
-                if 0 <= cx < len(self.grid[0]) and 0 <= cy < len(self.grid):
-                    centers.add(Position(cx, cy))
-        return centers
 
     def compute_candidate_targets(self) -> List[Tuple[Position, Set[int]]]:
+        # Any target that would hit a friendly agent (including self) is excluded
         enemy_map = {e.position: e.agent_id for e in self.enemies}
-        candidate_centers: Set[Position] = set()
+        target_map: Dict[Position, Set[int]] = {}
 
         for enemy in self.enemies:
-            candidate_centers.update(self.get_possible_bomb_centers_for_enemy(enemy.position))
-
-        candidates = []
-        seen: Set[Position] = set()
-        for center in candidate_centers:
-            if center in seen:
-                continue
-            aoe = self.get_aoe_tiles(center)
-            hit_ids = {eid for pos, eid in enemy_map.items() if pos in aoe}
-            if hit_ids:
-                candidates.append((center, hit_ids))
-                seen.add(center)
-
-        print(f"[DEBUG] {len(candidates)} candidate bomb targets computed", file=sys.stderr)
-        return candidates
-
-    def get_throw_origins(self, target: Position) -> Set[Position]:
-        origins = set()
-        for dx in range(-4, 5):
-            for dy in range(-4, 5):
-                if abs(dx) + abs(dy) > 4:
-                    continue
-                px, py = target.x + dx, target.y + dy
-                if 0 <= px < len(self.grid[0]) and 0 <= py < len(self.grid):
-                    origins.add(Position(px, py))
-        return origins
-
-    def plan_throw_assignments(self) -> Optional[Dict[int, List[Tuple[Position, Position]]]]:
-        total_enemies = {e.agent_id for e in self.enemies}
-        candidates = self.compute_candidate_targets()
-        target_aoe_map = {center: aoe for center, aoe in candidates}
-
-        # Precompute throw origins for targets
-        target_to_origins: Dict[Position, Set[Position]] = {
-            target: self.get_throw_origins(target) for target in target_aoe_map
-        }
-
-        # Precompute reachability for each agent
-        agent_reach: Dict[int, Set[Position]] = {}
-        for agent in self.agents:
-            reachable = set()
-            for target, origins in target_to_origins.items():
-                for origin in origins:
-                    path = self.pathfinder.find_path(agent.position, origin, self.blocked)
-                    if path:
-                        reachable.add(origin)
-            agent_reach[agent.agent_id] = reachable
-
-        # Only consider combinations of candidates that cover all enemies
-        full_cover_combos = []
-        for k in range(1, min(sum(a.bomb_cnt for a in self.agents), len(candidates)) + 1):
-            for combo in combinations(candidates, k):
-                covered = set()
-                targets = []
-                for center, ids in combo:
-                    covered.update(ids)
-                    targets.append(center)
-                if covered == total_enemies:
-                    full_cover_combos.append(targets)
-
-        print(f"[DEBUG] Found {len(full_cover_combos)} full-cover combinations", file=sys.stderr)
-
-        # Attempt assignment only on full coverage combos
-        for combo_index, targets in enumerate(full_cover_combos):
-            print(f"[DEBUG] Trying combo {combo_index + 1}/{len(full_cover_combos)}: {[str(t) for t in targets]}", file=sys.stderr)
-            assignments: Dict[int, List[Tuple[Position, Position]]] = {}
-            bombs_left = {a.agent_id: a.bomb_cnt for a in self.agents}
-            used_origins: Set[Position] = set()
-            success = True
-
-            for target in targets:
-                assigned = False
-                origins = target_to_origins[target]
-                for agent in self.agents:
-                    if bombs_left[agent.agent_id] == 0:
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    cx, cy = enemy.position.x - dx, enemy.position.y - dy
+                    center = Position(cx, cy)
+                    if not (0 <= cx < self.width and 0 <= cy < self.height):
                         continue
-                    for origin in origins:
-                        if origin in used_origins:
-                            continue
-                        if origin in agent_reach[agent.agent_id]:
-                            assignments.setdefault(agent.agent_id, []).append((origin, target))
-                            bombs_left[agent.agent_id] -= 1
-                            used_origins.add(origin)
-                            assigned = True
-                            break
-                    if assigned:
-                        break
-                if not assigned:
-                    print(f"[DEBUG] Failed to assign target {target}", file=sys.stderr)
-                    success = False
-                    break
 
-            if success:
-                print(f"[DEBUG] Successful plan found with {len(assignments)} agents", file=sys.stderr)
-                return assignments
+                    aoe = self.get_aoe_tiles(center)
+                    if any(pos in self.agent_positions for pos in aoe):  # exclude any target whose AoE would hit a friendly
+                        continue
 
-        print("[DEBUG] No valid assignment found", file=sys.stderr)
-        return None
+                    hit_ids = {eid for pos, eid in enemy_map.items() if pos in aoe}
+                    if hit_ids:
+                        target_map[center] = hit_ids
 
+        sorted_targets = sorted(target_map.items(), key=lambda t: len(t[1]), reverse=True)
+
+        # Remove overlapping AoEs by greedily claiming the best hits
+        claimed_enemies = set()
+        final_targets = []
+        for center, hit_ids in sorted_targets:
+            new_hits = hit_ids - claimed_enemies
+            if new_hits:
+                final_targets.append((center, hit_ids))
+                claimed_enemies.update(hit_ids)
+
+        return final_targets
 
     def decide(self) -> List[str]:
-        throw_plan = self.plan_throw_assignments()
-        if not throw_plan:
-            return [f"{a.agent_id};HUNKER_DOWN" for a in self.agents]
-
         actions = []
-        for agent in self.agents:
-            cmds = []
-            if agent.agent_id not in throw_plan:
-                cmds.append("HUNKER_DOWN")
-            else:
-                assignments = throw_plan[agent.agent_id]
-                for origin, target in assignments:
-                    if agent.position == origin:
-                        cmds.append(f"THROW {target.x} {target.y}")
-                    else:
-                        path = self.pathfinder.find_path(agent.position, origin, self.blocked)
-                        if path and len(path) > 1:
-                            next_pos = path[1]
-                            cmds.append(f"MOVE {next_pos.x} {next_pos.y}")
-                            if next_pos == origin:
-                                cmds.append(f"THROW {target.x} {target.y}")
-                        else:
-                            cmds.append("HUNKER_DOWN")
-                        break  # Only one move per turn
-            actions.append(f"{agent.agent_id};{'/'.join(cmds)}")
-        return actions
+        claimed_targets: Set[FrozenSet[int]] = set()
+        reserved_positions: Set[Position] = set()
+        used_agents: Set[int] = set()
 
+        candidates = self.compute_candidate_targets()
+        agent_map = {a.agent_id: a for a in self.agents if a.bomb_cnt > 0}
+
+        # PASS 1: THROW or MOVE+THROW
+        for agent_id, agent in agent_map.items():
+            print(f"PASS 1: planning {agent}", file=sys.stderr)
+                
+            if self.is_agent_trapped(agent):
+                print(f"Agent {agent.agent_id} is trapped", file=sys.stderr)
+                actions.append(f"{agent_id};HUNKER_DOWN")
+                used_agents.add(agent_id)
+                reserved_positions.add(agent.position)
+                continue
+
+            if agent.bomb_cnt == 0:
+                print(f"Agent {agent.agent_id} is out of ammo", file=sys.stderr)
+                actions.append(f"{agent_id};HUNKER_DOWN")
+                used_agents.add(agent_id)
+                reserved_positions.add(agent.position)
+                continue
+
+            for target, enemies_hit in candidates:
+                enemy_key = frozenset(enemies_hit)
+                if enemy_key in claimed_targets:
+                    continue
+
+                if any(pos in self.agent_positions for pos in self.get_aoe_tiles(target)):
+                    continue
+
+                if agent.position.distance_to(target) <= 4:
+                    actions.append(f"{agent_id};THROW {target.x} {target.y}")
+                    used_agents.add(agent_id)
+                    claimed_targets.add(enemy_key)
+                    reserved_positions.add(agent.position)
+                    break
+
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = agent.position.x + dx, agent.position.y + dy
+                    move_pos = Position(nx, ny)
+                    if (0 <= nx < self.width and 0 <= ny < self.height
+                        and move_pos.distance_to(target) <= 4
+                        and move_pos not in self.blocked_static
+                        and move_pos not in self.enemy_positions
+                        and move_pos not in reserved_positions):
+                        actions.append(f"{agent_id};MOVE {nx} {ny};THROW {target.x} {target.y}")
+                        used_agents.add(agent_id)
+                        claimed_targets.add(enemy_key)
+                        reserved_positions.add(move_pos)
+                        break
+                if agent_id in used_agents:
+                    break
+       
+        # PASS 2: MOVE  toward closest unclaimed target center
+        for agent_id, agent in agent_map.items():
+            if agent_id in used_agents:
+                continue
+
+            print(f"PASS 2: planning {agent}", file=sys.stderr)
+
+            best_target = None
+            best_dist = 9999999
+
+            for target, enemies_hit in candidates:
+                enemy_key = frozenset(enemies_hit)
+                if enemy_key in claimed_targets:
+                    continue
+
+                dist = agent.position.distance_to( target )
+                if dist < best_dist:
+                    best_target = target
+                    best_dist = dist
+
+            if best_target:
+                actions.append(f"{agent_id};MOVE {best_target.x} {best_target.y}")
+
+            else:
+                actions.append(f"{agent_id};HUNKER_DOWN")
+
+        return actions
 
 class Game:
     def __init__(self):
@@ -587,8 +628,7 @@ class Game:
         self.state = GameState.from_input()
         self.cover = CoverAnalyzer(self.state.grid)
 
-        self.bot = BombBot(self.state)
-
+        
     def run(self):
 
         while True:            
@@ -596,7 +636,7 @@ class Game:
 
             print(self.state.debug_string(), file=sys.stderr)
 
-            actions = self.bot.decide()
+            actions = BombBot(self.state).decide()
             for act in actions:
                 print(act, flush=True)
 

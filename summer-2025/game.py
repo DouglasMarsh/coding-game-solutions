@@ -1,7 +1,9 @@
+import math
+import random
 import sys
 import heapq
 from dataclasses import dataclass
-from typing import List, Dict, NamedTuple, Optional, Set, Tuple
+from typing import List, Dict, NamedTuple, Optional, Set, Tuple, Union
 from collections import deque
 import time
 
@@ -35,6 +37,7 @@ class Tile:
 
 @dataclass
 class AgentMeta:
+    my_id:int
     agent_id: int
     is_enemy: bool
     shoot_cd: int
@@ -49,6 +52,7 @@ class Agent:
     cooldown: int
     bomb_cnt: int
     wetness: int
+    is_hunkered = False
 
     @property
     def agent_id(self) -> int:
@@ -64,29 +68,38 @@ class Agent:
 
     def has_bombs(self) -> bool:
         return self.bomb_cnt > 0
+    
+    def same_team(self, a:'Agent'):
+        return self.metadata.my_id == a.metadata.my_id
+    
+    def clone(self):
+        return Agent(self.metadata, self.position, self.cooldown, self.bomb_cnt, self.wetness)
 
 Grid = List[List[Tile]]
 
 class AStarPathfinder:
-    def __init__(self, width: int, height: int, grid: Grid):
+    def __init__(self, width: int, height: int, static_blocked: Set[Position]):
         self.width = width
         self.height = height
-        self.grid = grid
+        self.static_blocked = static_blocked
 
-    def neighbors(self, node: Position) -> List[Position]:
+    def neighbors(self, node: Position, blocked: Set[Position]) -> List[Position]:
         x, y = node
         results = []
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < self.width and 0 <= ny < self.height:
-                if self.grid[ny][nx].tile_type == 0:
-                    results.append(Position(nx, ny))
+                neighbor = Position(nx, ny)
+                if neighbor not in blocked:
+                    results.append(neighbor)
         return results
 
     def heuristic(self, a: Position, b: Position) -> int:
-        return a.distance_to(b)
+        return abs(a.x - b.x) + abs(a.y - b.y)
 
-    def find_path(self, start: Position, goal: Position, blocked: Set[Position]) -> List[Position]:
+    def find_path(self, start: Position, goal: Position, dynamic_blocked: Set[Position]) -> List[Position]:
+        blocked = self.static_blocked | dynamic_blocked
+
         open_set = []
         heapq.heappush(open_set, (self.heuristic(start, goal), 0, start))
         came_from = {}
@@ -102,9 +115,7 @@ class AStarPathfinder:
                 path.reverse()
                 return path
 
-            for neighbor in self.neighbors(current):
-                if neighbor in blocked and neighbor != goal:
-                    continue
+            for neighbor in self.neighbors(current, blocked):
                 new_cost = cost + 1
                 if neighbor not in cost_so_far or new_cost < cost_so_far[neighbor]:
                     cost_so_far[neighbor] = new_cost
@@ -127,6 +138,7 @@ class CoverAnalyzer:
         return False
 
 class GameState:
+    """GameState object"""
     def __init__(self, my_id: int, width: int, height: int, grid: List[List[Tile]], blocked: Set[Position], agents_meta: Dict[int, AgentMeta]):
         self.my_id = my_id
         self.width = width
@@ -134,13 +146,13 @@ class GameState:
         self.grid = grid
         self.blocked = blocked
         self.all_agents_meta = agents_meta
-        self.pathfinder = AStarPathfinder(width, height, grid)
+        self.pathfinder = AStarPathfinder(width, height, blocked)
         self.my_agents: List[Agent] = []
         self.enemies: List[Agent] = []
         self.my_score = 0
         self.enemy_score = 0
         self.my_dist_map: List[List[int]] = []
-        self.enemy_dist_map: List[List[int]] = []  
+        self.enemy_dist_map: List[List[int]] = []
 
     @staticmethod
     def from_input():
@@ -150,7 +162,7 @@ class GameState:
 
         for _ in range(agent_data_count):
             agent_id, player, cd, rng, power, bombs = map(int, input().split())
-            agents_meta[agent_id] = AgentMeta(agent_id, player != my_id, cd, rng, power, bombs)
+            agents_meta[agent_id] = AgentMeta(my_id, agent_id, player != my_id, cd, rng, power, bombs)
 
         width, height = map(int, input().split())
         grid: List[List[Optional[Tile]]] = [[None for _ in range(width)] for _ in range(height)]
@@ -167,36 +179,7 @@ class GameState:
         state = GameState(my_id, width, height, grid, blocked, agents_meta)
 
         return state
-
-    def debug_string(self) -> str:
-        lines = []
-        lines.append("[GRID]")
-        for y in range(self.height):
-            row_str = f"{y}: "
-            for x in range(self.width):
-                pos = Position(x, y)
-                tile = self.grid[y][x]
-                char = "."
-                if tile.tile_type == 1:
-                    char = "L"
-                elif tile.tile_type == 2:
-                    char = "H"
-                for agent in self.my_agents:
-                    if agent.position == pos:
-                        char = str(agent.agent_id)
-                for enemy in self.enemies:
-                    if enemy.position == pos:
-                        char = "E"
-                row_str += f"{char} "
-            lines.append(row_str.strip())
-
-        lines.append("\n[AGENTS]")
-        for a in self.my_agents:
-            lines.append(f"{a.agent_id} @ ({a.position.x},{a.position.y}) cd={a.cooldown} b={a.bomb_cnt} w={a.wetness}")
-        for e in self.enemies:
-            lines.append(f"E{e.agent_id} @ ({e.position.x},{e.position.y}) w={e.wetness}")
-        return "\n".join(lines)
-
+    
     def compute_distance_maps(self) -> Tuple[List[List[int]], List[List[int]]]:
         width, height = self.width, self.height
 
@@ -267,6 +250,35 @@ class GameState:
         input()
 
         self.compute_scores()
+
+    def debug_string(self) -> str:
+        lines = []
+        lines.append("[GRID]")
+        for y in range(self.height):
+            row_str = f"{y}: "
+            for x in range(self.width):
+                pos = Position(x, y)
+                tile = self.grid[y][x]
+                char = "."
+                if tile.tile_type == 1:
+                    char = "L"
+                elif tile.tile_type == 2:
+                    char = "H"
+                for agent in self.my_agents:
+                    if agent.position == pos:
+                        char = str(agent.agent_id)
+                for enemy in self.enemies:
+                    if enemy.position == pos:
+                        char = "E"
+                row_str += f"{char} "
+            lines.append(row_str.strip())
+
+        lines.append("\n[AGENTS]")
+        for a in self.my_agents:
+            lines.append(f"{a.agent_id} @ ({a.position.x},{a.position.y}) cd={a.cooldown} b={a.bomb_cnt} w={a.wetness}")
+        for e in self.enemies:
+            lines.append(f"E{e.agent_id} @ ({e.position.x},{e.position.y}) w={e.wetness}")
+        return "\n".join(lines)
 
 class TacticalBot:
     def __init__(self, state: GameState):  # Added danger map caching
@@ -504,6 +516,322 @@ class TacticalBot:
 
             return actions
 
+class MCTS:
+    @dataclass
+    class MoveAction:
+        target: Position
+        def __str__(self):
+            return f"MOVE {self.target.x} {self.target.y}"
+    @dataclass
+    class ShootAction:
+        target_id: int
+        def __str__(self):
+            return "SHOOT {self.target_id}"
+    @dataclass
+    class ThrowAction:
+        target_pos: Position
+        def __str__(self):
+            return f"THROW {self.target_pos.x} {self.target_pos.y}"
+
+    @dataclass
+    class HunkerAction:
+        def __str__(self):
+            return "HUNKER_DOWN"
+
+    Action = Union['MCTS.MoveAction','MCTS.ShootAction', 'MCTS.ThrowAction', 'MCTS.HunkerAction']
+    CombatAction = Union['MCTS.ShootAction', 'MCTS.ThrowAction', 'MCTS.HunkerAction']
+
+    class MiniGameState:
+        """Trim version of GameState to support MCTS"""
+        def __init__(self, width: int, height: int, grid: Grid, my_score: int, enemy_score: int,
+                    pathfinder: AStarPathfinder, agents: List[Agent], enemies: List[Agent]):
+            self.width = width
+            self.height = height
+            self.grid = grid
+            self.pathfinder = pathfinder
+            self.agents = agents
+            self.enemies = enemies
+            self.all_agents = agents + enemies
+            self.my_score = my_score
+            self.enemy_score = enemy_score
+
+        @staticmethod
+        def from_game_state(state: GameState) -> 'MCTS.MiniGameState':
+            return MCTS.MiniGameState(
+                width=state.width,
+                height=state.height,
+                grid=state.grid,
+                my_score=state.my_score,
+                enemy_score=state.enemy_score,
+                pathfinder=state.pathfinder,
+                agents=[a.clone() for a in state.my_agents],
+                enemies=[e.clone() for e in state.enemies]
+            )
+
+        def clone(self) -> 'MCTS.MiniGameState':
+            return MCTS.MiniGameState(
+                self.width,
+                self.height,
+                self.grid,
+                self.my_score,
+                self.enemy_score,
+                self.pathfinder,
+                [a.clone() for a in self.agents],
+                [e.clone() for e in self.enemies]
+            )
+
+        def apply_action(self, agent_id: int, action: Optional['MCTS.Action']):
+            if not action:
+                return
+
+            agent = next((a for a in self.all_agents if a.agent_id == agent_id), None)
+            if not agent or agent.wetness >= 100:
+                return  # dead agent, skip
+
+            if action:
+                if isinstance(action, MCTS.MoveAction) and action.target != agent.position:
+                    if all(action.target != other.position for other in self.all_agents):
+                        agent.position = action.target
+
+                if isinstance(action, MCTS.ShootAction):
+                    if agent.cooldown > 0:
+                        return
+                    target = next((e for e in self.all_agents if e.agent_id == action.target_id and e.wetness < 100), None)
+                    if target:
+                        dist = agent.position.distance_to(target.position)
+                        if dist <= 2 * agent.metadata.opt_range:
+                            dmg = agent.metadata.soak_power * (1.0 if dist <= agent.metadata.opt_range else 0.5)
+                            target.wetness += int(dmg)
+                            agent.cooldown = agent.metadata.shoot_cd
+
+                elif isinstance(action, MCTS.ThrowAction):
+                    if agent.bomb_cnt > 0:
+                        tx, ty = action.target_pos.x, action.target_pos.y
+                        for e in self.all_agents:
+                            if abs(e.position.x - tx) <= 1 and abs(e.position.y - ty) <= 1:
+                                e.wetness += 30
+                        agent.bomb_cnt -= 1
+
+                elif isinstance(action, MCTS.HunkerAction):
+                    agent.is_hunkered = True
+
+        def simulate_turn(self, actions: List[Tuple[int,Optional['MCTS.MoveAction'],Optional['MCTS.CombatAction'] ]]):
+            # 1. MOVE phase
+            for agent_id, move, _ in actions:
+                self.apply_action(agent_id, move)
+
+            # 2a. HUNKER phase
+            for agent_id, _, combat in actions:
+                if isinstance(combat, MCTS.HunkerAction):
+                    self.apply_action(agent_id, combat)
+            
+            # 2b. COMBAT phase
+            for agent_id, _, combat in actions:
+                if not isinstance(combat, MCTS.HunkerAction):
+                    self.apply_action(agent_id, combat)
+
+            # 3. Remove soaked agents
+            self.agents = [a for a in self.agents if a.wetness < 100]
+            self.enemies = [e for e in self.enemies if e.wetness < 100]
+            self.all_agents = self.agents + self.enemies
+            
+            # 4. Tick cooldowns
+            for agent in self.all_agents:
+                if agent.cooldown > 0:
+                    agent.cooldown -= 1
+
+        def get_valid_actions(self, agent: Agent) -> List[Tuple[Optional['MCTS.MoveAction'], Optional['MCTS.CombatAction']]]:
+            directions = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
+            positions = []
+
+            for dx, dy in directions:
+                nx, ny = agent.position.x + dx, agent.position.y + dy
+                if 0 <= nx < self.width and 0 <= ny < self.height:
+                    pos = Position(nx, ny)
+                    if all(pos != other.position for other in self.all_agents):
+                        positions.append(pos)
+            if not positions:
+                positions = [agent.position]
+
+            combat: List[Optional['MCTS.CombatAction']] = [None]
+
+            if agent.cooldown == 0:
+                for a in self.all_agents:
+                    if agent.same_team( a ): continue
+
+                    if a.wetness >= 100:
+                        continue
+                    if agent.position.distance_to(a.position) <= 2 * agent.metadata.opt_range:
+                        combat.append(MCTS.ShootAction(a.agent_id))
+
+            if agent.bomb_cnt > 0:
+                for dx in range(-4, 5):
+                    for dy in range(-4, 5):
+                        if abs(dx) + abs(dy) <= 4:
+                            tx, ty = agent.position.x + dx, agent.position.y + dy
+                            if 0 <= tx < self.width and 0 <= ty < self.height:
+                                combat.append(MCTS.ThrowAction(Position(tx, ty)))
+
+            combat.append(MCTS.HunkerAction())
+
+            return [(MCTS.MoveAction(pos), cb) for pos in positions for cb in combat]
+
+        def evaluate(self) -> float:
+            width, height = self.width, self.height
+            control_map = [[0 for _ in range(width)] for _ in range(height)]
+
+            def apply_influence(agent: Agent, team: int, radius: int = 6):
+                if agent.wetness >= 100:
+                    return
+                r = radius if agent.wetness < 50 else radius // 2
+                x0, y0 = agent.position.x, agent.position.y
+
+                for dy in range(-r, r + 1):
+                    for dx in range(-r, r + 1):
+                        if abs(dx) + abs(dy) > r:
+                            continue
+                        x, y = x0 + dx, y0 + dy
+                        if 0 <= x < width and 0 <= y < height:
+                            if control_map[y][x] == -team:
+                                control_map[y][x] = 0  # neutralize
+                            elif control_map[y][x] == 0:
+                                control_map[y][x] = team
+
+            # Apply agent and enemy influence
+            for a in self.agents:
+                apply_influence(a, team=1)
+            for e in self.enemies:
+                apply_influence(e, team=-1)
+
+            # Score control map
+            tile_score = sum(1 for row in control_map for v in row if v == 1) - \
+                        sum(1 for row in control_map for v in row if v == -1)
+
+            # Other metrics
+            my_alive = sum(1 for a in self.agents if a.wetness < 100)
+            enemy_alive = sum(1 for e in self.enemies if e.wetness < 100)
+
+            my_wet = sum(a.wetness for a in self.agents)
+            enemy_wet = sum(e.wetness for e in self.enemies)
+
+            agent_score = 50 * (my_alive - enemy_alive)
+            wetness_score = (enemy_wet - my_wet)
+            score_delta = 10 * (self.my_score - self.enemy_score)
+
+            return score_delta + agent_score + wetness_score + tile_score
+
+    class MCTSNode:
+        def __init__(self, state: 'MCTS.MiniGameState', parent: Optional['MCTS.MCTSNode'] = None):
+            self.state = state
+            self.parent = parent
+            self.children: List[MCTS.MCTSNode] = []
+            self.visits = 0
+            self.value = 0.0
+
+            self.applied_action_plan: Optional[List[Tuple[int, MCTS.MoveAction, MCTS.CombatAction]]] = None
+
+            # Precompute all valid per-agent actions once
+            self.possible_joint_actions: List[List[Tuple[int, MCTS.MoveAction, MCTS.CombatAction]]] = []
+            self._initialize_joint_actions()
+
+        def _initialize_joint_actions(self):
+            agent_actions: Dict[int, List[Tuple[MCTS.MoveAction, MCTS.CombatAction]]] = {}
+
+            for agent in self.state.agents:
+                agent_actions[agent.agent_id] = self.state.get_valid_actions(agent)
+
+            # Naive: take first N sampled combinations (random Cartesian sampling)
+            joint = []
+            for agent_id, actions in agent_actions.items():
+                if actions:
+                    move, combat = random.choice(actions)
+                    joint.append((agent_id, move, combat))
+
+            self.possible_joint_actions.append(joint)
+
+        def is_fully_expanded(self) -> bool:
+            return len(self.possible_joint_actions) == 0
+
+        def expand(self) -> 'MCTS.MCTSNode':
+            if self.is_fully_expanded():
+                raise RuntimeError("No more actions to expand.")
+
+            action_plan = self.possible_joint_actions.pop()
+            new_state = self.state.clone()
+            new_state.simulate_turn(action_plan)
+
+            child = MCTS.MCTSNode(new_state, parent=self)
+            child.applied_action_plan = action_plan
+            self.children.append(child)
+            return child
+
+        def best_child(self, c: float = 1.41) -> 'MCTS.MCTSNode':
+            def uct_score(child: 'MCTS.MCTSNode') -> float:
+                if child.visits == 0:
+                    return float('inf')
+                exploitation = child.value / child.visits
+                exploration = c * math.sqrt(math.log(self.visits + 1) / (child.visits))
+                return exploitation + exploration
+
+            return max(self.children, key=uct_score)
+
+        def backpropagate(self, reward: float):
+            self.visits += 1
+            self.value += reward
+            if self.parent:
+                self.parent.backpropagate(reward)
+
+        def rollout(self) -> float:
+            rollout_state = self.state.clone()
+            for agent in rollout_state.agents:
+                actions = rollout_state.get_valid_actions(agent)
+                if actions:
+                    move, combat = random.choice(actions)
+                    rollout_state.apply_action(agent.agent_id, move)
+                    rollout_state.apply_action(agent.agent_id, combat)
+
+            # Also simulate enemy actions
+            for enemy in rollout_state.enemies:
+                actions = rollout_state.get_valid_actions(enemy)
+                if actions:
+                    move, combat = random.choice(actions)
+                    rollout_state.apply_action(enemy.agent_id, move)
+                    rollout_state.apply_action(enemy.agent_id, combat)
+
+            return rollout_state.evaluate()
+
+    
+    @staticmethod
+    def search(state: GameState, time_limit_ms: float = 45.0, turn: int = 0) -> List[Tuple[int, Optional['MCTS.MoveAction'], Optional['MCTS.CombatAction']]]:
+        start = time.perf_counter()
+        root_state = MCTS.MiniGameState.from_game_state(state)
+        root = MCTS.MCTSNode(root_state)
+
+        iterations = 0
+        while (time.perf_counter() - start) * 1000 < time_limit_ms:
+            node = root
+
+            # 1. Selection
+            while not node.is_fully_expanded() and node.children:
+                node = node.best_child()
+
+            # 2. Expansion
+            if not node.is_fully_expanded():
+                node = node.expand()
+
+            # 3. Rollout
+            reward = node.rollout()
+
+            # 4. Backpropagation
+            node.backpropagate(reward)
+            iterations += 1
+
+        print(f"[MCTS] Iterations: {iterations}", file=sys.stderr)
+
+        # Exploit best child
+        best = root.best_child(c=0)
+        return best.applied_action_plan or []
+
 class Game:
     def __init__(self):
         with Timer("Initialize from input"):
@@ -517,9 +845,16 @@ class Game:
                 print(self.state.debug_string(), file=sys.stderr)
                 print(f"[SCORE] Me = {self.state.my_score}, Enemy = {self.state.enemy_score}, Delta = {self.state.my_score - self.state.enemy_score}", file=sys.stderr)
             
-                actions = TacticalBot(self.state).decide(turn)
-                for act in actions:
-                    print(act, flush=True)
+                actions = MCTS.search(self.state)
+
+                for agent_id, move, combat in actions:
+                    cmds = [f"{agent_id}"]
+                    if move:
+                        cmds.append(f"{move}")
+                    if combat:                        
+                        cmds.append(f"{combat}")
+                    cmds.append("MESSAGE MCTS")
+                    print(";".join(cmds), flush=True)
                 
                 turn += 1
 

@@ -3,6 +3,19 @@ import heapq
 from dataclasses import dataclass
 from typing import List, Dict, NamedTuple, Optional, Set, Tuple
 from collections import deque
+import time
+
+class Timer:
+    def __init__(self, label):
+        self.label = label
+        self.start = None
+
+    def __enter__(self):
+        self.start = time.perf_counter()
+
+    def __exit__(self, *args):
+        elapsed = (time.perf_counter() - self.start) * 1000
+        print(f"[TIMER] {self.label}: {elapsed:.2f}ms", file=sys.stderr)
 
 # --- Type Aliases ---
 class Position(NamedTuple):
@@ -126,7 +139,8 @@ class GameState:
         self.enemies: List[Agent] = []
         self.my_score = 0
         self.enemy_score = 0
-
+        self.my_dist_map: List[List[int]] = []
+        self.enemy_dist_map: List[List[int]] = []  
 
     @staticmethod
     def from_input():
@@ -270,6 +284,9 @@ class TacticalBot:
 
     def get_strategy_mode(self) -> str:
         delta = self.compute_score_delta()
+        early_game = self.state.my_score + self.state.enemy_score < 10
+        if early_game:
+            return "aggressive"
         if delta < -30:
             return "aggressive"
         elif delta > 100:
@@ -300,21 +317,22 @@ class TacticalBot:
                         control_map[y][x] = 0
         return control_map
 
-    def compute_danger_map(self) -> Dict[Position, int]:
+    def compute_danger_map(self) -> Dict[Position, float]:
         danger_map = {}
         for y in range(self.state.height):
             for x in range(self.state.width):
                 pos = Position(x, y)
-                danger = 0
+                incoming_damage = 0
+
                 for enemy in self.state.enemies:
                     if enemy.cooldown > 0:
                         continue
+
                     dist = pos.distance_to(enemy.position)
                     if dist > 2 * enemy.metadata.opt_range:
                         continue
-                    range_mult = 1.0 if dist <= enemy.metadata.opt_range else 0.5
 
-                    # Cover logic: shot must pass through cover between enemy and pos
+                    range_mult = 1.0 if dist <= enemy.metadata.opt_range else 0.5
                     dx = pos.x - enemy.position.x
                     dy = pos.y - enemy.position.y
                     step_x = 0 if dx == 0 else dx // abs(dx)
@@ -332,11 +350,21 @@ class TacticalBot:
                             cover_mult = 0.5
 
                     damage = int(enemy.metadata.soak_power * range_mult * cover_mult)
-                    danger += damage
+                    incoming_damage += damage
+
+                # Convert cumulative damage to "danger" based on time-to-death
+                if incoming_damage == 0:
+                    danger = 0.0
+                else:
+                    turns_to_die = 100.0 / incoming_damage
+                    danger = 1.0 / turns_to_die  # danger = 0.25 if agent dies in 4 turns
+
                 danger_map[pos] = danger
+
         return danger_map
 
-    def find_best_move_tile(self, agent: Agent, max_depth: int = 6) -> Optional[Position]:
+    def find_best_move_tile(self, agent: Agent, turn: int, max_depth: int = 6) -> Optional[Position]:
+        
         visited = set()
         frontier = [(agent.position, 0)]
         best_tile = None
@@ -344,17 +372,20 @@ class TacticalBot:
         strategy = self.get_strategy_mode()
 
         if strategy == "aggressive":
-            danger_weight = 0.2
-            control_weight = -15.0
+            danger_weight = 10.0
+            control_weight = -25.0
         elif strategy == "defensive":
-            danger_weight = 5.0
-            control_weight = -2.0
+            danger_weight = 80.0
+            control_weight = -4.0
         else:
-            danger_weight = 3.0
+            danger_weight = 30.0
             control_weight = -10.0
 
-        def evaluate_tile_danger(tile: Position) -> int:
-            return self.danger_map.get(tile, 0)
+        def advance_bias(pos: Position) -> float:
+            return (self.state.width - pos.x) * 0.2
+
+        def evaluate_tile_danger(tile: Position) -> float:
+            return self.danger_map.get(tile, 0.0)
 
         while frontier:
             current, depth = frontier.pop(0)
@@ -367,15 +398,17 @@ class TacticalBot:
                 continue
 
             danger = evaluate_tile_danger(current)
-            control_score = -self.tile_control[current.y][current.x]  # Prefer contested/enemy tiles
+            control_score = -self.tile_control[current.y][current.x]
+            bias = advance_bias(current)
 
-            score = danger_weight * danger + control_weight * control_score
+            score = danger_weight * danger + control_weight * control_score - bias
+
+            if danger == 0 and control_score == 0:
+                score -= 5.0  # encourage forward movement when all else is equal
 
             if score < best_score:
                 best_score = score
                 best_tile = current
-
-            print(f"Tile {current} → danger={danger}, control={control_score}, score={score}", file=sys.stderr)
 
             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                 nx, ny = current.x + dx, current.y + dy
@@ -384,110 +417,110 @@ class TacticalBot:
                     if neighbor not in visited:
                         frontier.append((neighbor, depth + 1))
 
-                if not best_tile:
-                    forward_y = agent.position.y + 1
-                    if forward_y < self.state.height:
-                        fallback = Position(agent.position.x, forward_y)
-                        if self.grid[forward_y][agent.position.x].tile_type == 0:
-                            best_tile = fallback
-
         return best_tile
 
-    def decide(self) -> List[str]:
-        actions = []
-        blocked = set(a.position for a in self.state.my_agents + self.state.enemies)
+    def decide(self, turn: int) -> List[str]:
+        with Timer("decide"):
+            actions = []
+            blocked = set(a.position for a in self.state.my_agents + self.state.enemies)
 
-        for agent in self.state.my_agents:
-            cmds = []
-            moved = False
-
-            # Movement
-            best_tile = self.find_best_move_tile(agent)
-            if best_tile and best_tile != agent.position:
-                # Skip pathfinding if agent is already at best_tile
-                if best_tile == agent.position:
-                    step = agent.position
-                else:
-                    path = self.state.pathfinder.find_path(agent.position, best_tile, blocked)
-                if best_tile == agent.position:
+            for agent in self.state.my_agents:
+                with Timer(f"decide for Agent {agent.agent_id}"):
+                    cmds = []
                     moved = False
-                elif len(path) > 1:
-                    step = path[1]
-                    cmds.append(f"MOVE {step.x} {step.y}")
-                    blocked.add(step)
-                    moved = True
+                    attacked = False
 
-            # Combat
-            attacked = False
-            if agent.has_bombs():
-                best_tile = None
-                max_hits = 0
-                friendlies = {a.position for a in self.state.my_agents}
+                    best_tile = self.find_best_move_tile(agent, turn)
+                    move_step = None
+                    if best_tile and best_tile != agent.position:
+                        path = self.state.pathfinder.find_path(agent.position, best_tile, blocked)
+                        if len(path) > 1:
+                            move_step = path[1]
+                            cmds.append(f"MOVE {move_step.x} {move_step.y}")
+                            blocked.add(move_step)
+                            moved = True
+                    
+                    
+                    if agent.cooldown == 0:
+                        potential_pos = move_step if move_step else agent.position
+                        best_target = None
+                        best_damage = -1
+                        for enemy in self.state.enemies:
+                            dist = potential_pos.distance_to(enemy.position)
+                            if dist <= 2 * agent.metadata.opt_range:
+                                range_mult = 1.0 if dist <= agent.metadata.opt_range else 0.5
+                                damage = int(agent.metadata.soak_power * range_mult)
+                                threat_score = damage + (100 - enemy.wetness)
+                                if threat_score > best_damage:
+                                    best_damage = threat_score
+                                    best_target = enemy.agent_id
+                        if best_target is not None:
+                            if best_damage >= 10 or self.get_strategy_mode() == "aggressive":
+                                cmds.append(f"SHOOT {best_target}")
+                            attacked = True
 
-                for dx in range(-4, 5):
-                    for dy in range(-4, 5):
-                        if abs(dx) + abs(dy) > 4:
-                            continue
-                        tx, ty = agent.position.x + dx, agent.position.y + dy
-                        if not (0 <= tx < self.state.width and 0 <= ty < self.state.height):
-                            continue
-                        center = Position(tx, ty)
-                        aoe = [
-                            Position(tx + ox, ty + oy)
-                            for ox in [-1, 0, 1]
-                            for oy in [-1, 0, 1]
-                            if 0 <= tx + ox < self.state.width and 0 <= ty + oy < self.state.height
-                        ]
-                        if any(p in friendlies for p in aoe):
-                            continue
-                        hits = sum(1 for e in self.state.enemies if e.position in aoe)
-                        if hits > max_hits:
-                            max_hits = hits
-                            best_tile = center
+                    if not attacked and agent.has_bombs():
+                        best_tile = None
+                        max_hits = 0
+                        friendlies = {a.position for a in self.state.my_agents}
+                        origin = move_step if move_step else agent.position
 
-                if best_tile and max_hits >= 2:
-                    cmds.append(f"THROW {best_tile.x} {best_tile.y}")
-                    attacked = True
+                        for dx in range(-4, 5):
+                            for dy in range(-4, 5):
+                                if abs(dx) + abs(dy) > 4:
+                                    continue
+                                tx, ty = origin.x + dx, origin.y + dy
+                                if not (0 <= tx < self.state.width and 0 <= ty < self.state.height):
+                                    continue
+                                center = Position(tx, ty)
+                                aoe = [
+                                    Position(tx + ox, ty + oy)
+                                    for ox in [-1, 0, 1]
+                                    for oy in [-1, 0, 1]
+                                    if 0 <= tx + ox < self.state.width and 0 <= ty + oy < self.state.height
+                                ]
+                                if any(p in friendlies for p in aoe):
+                                    continue
+                                hits = sum(1 for e in self.state.enemies if e.position in aoe)
+                                if hits > max_hits:
+                                    max_hits = hits
+                                    best_tile = center
 
-            if not attacked and agent.cooldown == 0:
-                best_target = None
-                best_damage = -1
-                for enemy in self.state.enemies:
-                    dist = agent.position.distance_to(enemy.position)
-                    if dist <= 2 * agent.metadata.opt_range:
-                        range_mult = 1.0 if dist <= agent.metadata.opt_range else 0.5
-                        damage = int(agent.metadata.soak_power * range_mult)
-                        threat_score = damage + (100 - enemy.wetness)
-                        if threat_score > best_damage:
-                            best_damage = threat_score
-                            best_target = enemy.agent_id
-                if best_target is not None:
-                    if best_damage >= 10 or self.get_strategy_mode() == "aggressive":
-                        cmds.append(f"SHOOT {best_target}")
-                    attacked = True
+                        if best_tile and max_hits >= 2:
+                            cmds.append(f"THROW {best_tile.x} {best_tile.y}")
+                            attacked = True
 
-            if not attacked:
-                cmds.append("HUNKER_DOWN")
+                if not attacked and not moved:
+                    print("no movement or attack. computing fallback", file=sys.stderr)
 
-            cmds.append(f"MESSAGE {self.get_strategy_mode().capitalize()}")
-            msg = f"A{agent.agent_id} → Strategy: {self.get_strategy_mode()}, Pos: {agent.position}, CD: {agent.cooldown}, Wet: {agent.wetness}"
-            print(msg, file=sys.stderr)
-            actions.append(f"{agent.agent_id};{';'.join(cmds)}")
+                    if self.state.my_score < 300 or self.state.enemy_score < 300:
+                        cmds.append(f"MOVE {int(self.state.width/2)} {agent.position.y}")
+                    else:
+                        cmds.append("HUNKER_DOWN")
 
-        return actions
+                cmds.append(f"MESSAGE {self.get_strategy_mode().capitalize()}")
+                print(f"{agent}  → Strategy: {self.get_strategy_mode()}", file=sys.stderr)
+                actions.append(f"{agent.agent_id};{';'.join(cmds)}")
+
+            return actions
 
 class Game:
     def __init__(self):
-        self.state = GameState.from_input()
+        with Timer("Initialize from input"):
+            self.state = GameState.from_input()
 
     def run(self):
+        turn = 1
         while True:
-            self.state.read_turn()
-            print(self.state.debug_string(), file=sys.stderr)
-            print(f"[SCORE] Me = {self.state.my_score}, Enemy = {self.state.enemy_score}, Delta = {self.state.my_score - self.state.enemy_score}", file=sys.stderr)
-          
-            actions = TacticalBot(self.state).decide()
-            for act in actions:
-                print(act, flush=True)
+            with Timer(f"Turn {turn}"):
+                self.state.read_turn()
+                print(self.state.debug_string(), file=sys.stderr)
+                print(f"[SCORE] Me = {self.state.my_score}, Enemy = {self.state.enemy_score}, Delta = {self.state.my_score - self.state.enemy_score}", file=sys.stderr)
+            
+                actions = TacticalBot(self.state).decide(turn)
+                for act in actions:
+                    print(act, flush=True)
+                
+                turn += 1
 
 Game().run()
